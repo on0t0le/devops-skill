@@ -6,7 +6,7 @@ description: >
   instance — even if they don't say "Elasticsearch" but mention log search, index listing,
   or "ES". Supports multiple named instances (prod, staging, etc.). Trigger: /es, /elasticsearch,
   "list indexes", "search logs in elasticsearch", "query my ES cluster", "show me ES logs".
-trigger: /es
+trigger: /elasticsearch
 ---
 
 # Elasticsearch via curl
@@ -165,13 +165,13 @@ ES supports glob patterns. Pass through directly:
 - `logs-2024.*` matches date-sharded indexes
 - `*` matches everything (warn user this may be slow)
 
-## Config Management (`/es config`)
+## Config Management (`/elasticsearch config`)
 
-Trigger on: `/es config`, "add elasticsearch instance", "save this ES endpoint", "configure ES", "remember this cluster", "set default ES".
+Trigger on: `/elasticsearch config`, "add elasticsearch instance", "save this ES endpoint", "configure ES", "remember this cluster", "set default ES".
 
 Config file: `~/.claude/elasticsearch-instances.json`
 
-### `/es config add`
+### `/elasticsearch config add`
 
 Collect from user (ask only what's missing):
 - **name** — short alias, e.g. `prod`, `staging`, `local`
@@ -197,7 +197,7 @@ print('Saved.')
 
 Confirm: "Saved **NAME** (`URL`). Reference it by name in future requests."
 
-### `/es config list`
+### `/elasticsearch config list`
 
 Trigger on: "show ES instances", "what clusters do I have", "list configured ES".
 
@@ -207,13 +207,13 @@ Read and display `~/.claude/elasticsearch-instances.json` as a table:
 |------|-----|------|---------|
 | prod | http://... | basic | ✓ |
 
-### `/es config remove <name>`
+### `/elasticsearch config remove <name>`
 
 Trigger on: "remove ES instance", "delete ES config", "forget cluster NAME".
 
 Remove named entry, write back, confirm.
 
-### `/es config test [name]`
+### `/elasticsearch config test [name]`
 
 Trigger on: "test ES connection", "check if ES is reachable".
 
