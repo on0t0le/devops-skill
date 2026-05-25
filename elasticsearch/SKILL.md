@@ -182,18 +182,12 @@ Collect from user (ask only what's missing):
   - nothing → omit auth fields
 - **default** (optional) — ask "Make this the default instance?" → stored as `"default": true` (unset on others)
 
-Then write:
-```bash
-# Read existing or start fresh
-python3 -c "
-import json, os, sys
-path = os.path.expanduser('~/.claude/elasticsearch-instances.json')
-cfg = json.load(open(path)) if os.path.exists(path) else {'instances': {}}
-# ... apply changes ...
-json.dump(cfg, open(path, 'w'), indent=2)
-print('Saved.')
-"
-```
+Then write using the `Read` + `Write` tools directly (no shell commands):
+1. Read `~/.claude/elasticsearch-instances.json` if it exists (ignore error if absent)
+2. Parse JSON, apply changes
+3. Write back with `Write` tool
+
+No `python3`, no `bash`, no subprocess — just file tools.
 
 Confirm: "Saved **NAME** (`URL`). Reference it by name in future requests."
 
