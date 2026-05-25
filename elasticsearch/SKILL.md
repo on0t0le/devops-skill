@@ -165,14 +165,64 @@ ES supports glob patterns. Pass through directly:
 - `logs-2024.*` matches date-sharded indexes
 - `*` matches everything (warn user this may be slow)
 
-## Saving Config
+## Config Management (`/es config`)
 
-If user provides a new endpoint/credentials and asks to "remember" or "save" it:
+Trigger on: `/es config`, "add elasticsearch instance", "save this ES endpoint", "configure ES", "remember this cluster", "set default ES".
 
-1. Read `~/.claude/elasticsearch-instances.json` (create if absent)
-2. Ask for a name for this instance (e.g., "prod", "local")
-3. Add entry and write back
-4. Confirm: "Saved as 'NAME'. You can reference it by name in future requests."
+Config file: `~/.claude/elasticsearch-instances.json`
+
+### `/es config add`
+
+Collect from user (ask only what's missing):
+- **name** — short alias, e.g. `prod`, `staging`, `local`
+- **url** — full base URL, e.g. `http://es-prod:9200`
+- **auth** (optional) — one of:
+  - `user:pass` → stored as `"auth": "user:pass"`
+  - API key string → stored as `"auth_header": "ApiKey <key>"`
+  - nothing → omit auth fields
+- **default** (optional) — ask "Make this the default instance?" → stored as `"default": true` (unset on others)
+
+Then write:
+```bash
+# Read existing or start fresh
+python3 -c "
+import json, os, sys
+path = os.path.expanduser('~/.claude/elasticsearch-instances.json')
+cfg = json.load(open(path)) if os.path.exists(path) else {'instances': {}}
+# ... apply changes ...
+json.dump(cfg, open(path, 'w'), indent=2)
+print('Saved.')
+"
+```
+
+Confirm: "Saved **NAME** (`URL`). Reference it by name in future requests."
+
+### `/es config list`
+
+Trigger on: "show ES instances", "what clusters do I have", "list configured ES".
+
+Read and display `~/.claude/elasticsearch-instances.json` as a table:
+
+| Name | URL | Auth | Default |
+|------|-----|------|---------|
+| prod | http://... | basic | ✓ |
+
+### `/es config remove <name>`
+
+Trigger on: "remove ES instance", "delete ES config", "forget cluster NAME".
+
+Remove named entry, write back, confirm.
+
+### `/es config test [name]`
+
+Trigger on: "test ES connection", "check if ES is reachable".
+
+Run `_cluster/health` against instance, report green/yellow/red or connection error.
+
+### Default Instance
+
+If config has exactly one instance, or one marked `"default": true` → use it without asking.  
+If multiple and none is default → list them and ask which to use.
 
 ## Error Reference
 
