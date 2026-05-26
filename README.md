@@ -2,7 +2,29 @@
 
 Claude Code skills for DevOps workflows.
 
+**Install all skills:**
+
+```bash
+claude plugin install https://github.com/on0t0le/devops-skill
+```
+
 ## Skills
+
+### `k8s-pod-debugger/`
+
+Read-only Kubernetes diagnostics. Investigates Pod, Namespace, and Workload issues without touching cluster state.
+
+**Handles:** CrashLoopBackOff, OOMKilled, Pending, ImagePullBackOff, Evicted, Init failures, missing ConfigMaps/Secrets, node pressure, quota exhaustion.
+
+**Safe by design:** `kubectl get/describe/logs/top` only. No exec, no apply, no delete. No mutating HTTP calls.
+
+**Example prompts:**
+- `debug pod my-app-xyz in namespace production`
+- `why is my deployment crashing`
+- `investigate all failing pods in the staging namespace`
+- `pod is OOMKilled, what's wrong`
+
+---
 
 ### `elasticsearch/`
 
