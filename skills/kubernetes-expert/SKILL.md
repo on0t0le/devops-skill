@@ -81,7 +81,23 @@ kubectl get pod <NAME> -n <NS> -o json | jq '{exitCode: .status.containerStatuse
 kubectl logs <NAME> -n <NS> --tail=50   # last log lines before exit
 kubectl get deployment <WORKLOAD> -n <NS> -o json | jq '.spec.template.spec.containers[] | {command: .command, args: .args}'
 ```
-Causes: entrypoint/command exits immediately (wrong CMD), one-shot script run as Deployment, missing `while true` loop wrapper.
+
+Check ephemeral storage limit — pod evicted for exceeding it can appear as Completed:
+```bash
+# Check if ephemeral-storage limit is set
+kubectl get pod <NAME> -n <NS> -o json | jq '.spec.containers[] | {name: .name, ephemeral: .resources.limits["ephemeral-storage"]}'
+
+# Check events for ephemeral eviction
+kubectl get events -n <NS> --field-selector=involvedObject.name=<NAME> | grep -i "ephemeral\|evict\|disk"
+
+# Check pod status message (eviction reason is here)
+kubectl get pod <NAME> -n <NS> -o json | jq '{message: .status.message, reason: .status.reason}'
+
+# Node ephemeral storage pressure
+kubectl describe node <NODE> | grep -A3 "DiskPressure\|ephemeral"
+```
+
+Causes: entrypoint/command exits immediately (wrong CMD), one-shot script run as Deployment, missing `while true` loop wrapper, **ephemeral storage limit exceeded** (kubelet evicts pod — check `status.message` for "ephemeral-storage" and `status.reason: Evicted").
 
 ### 3. Describe (Events + Conditions)
 
@@ -192,7 +208,8 @@ kubectl get deploy,sts,ds,jobs -n <NS>
 | `Terminating` stuck | `describe` finalizers | Finalizer not clearing |
 | High restarts, no crash | logs (current) | Liveness probe too aggressive |
 | `ContainerStatusUnknown` | node conditions, runtime events | Node went NotReady, kubelet/runtime crash |
-| `Completed` in Deployment | logs, container command | CMD exits 0 — wrong entrypoint or one-shot script |
+| `Completed` in Deployment | logs, container command | CMD exits 0 — wrong entrypoint, one-shot script, or ephemeral storage eviction |
+| `Evicted` / ephemeral limit | `status.message`, pod events | Pod exceeded `ephemeral-storage` limit — kubelet terminated it |
 
 ## Output Format
 
