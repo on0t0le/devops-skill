@@ -36,13 +36,15 @@ Select based on context. When in doubt, query all configured systems.
 | **Prometheus** | Metrics: error rate, latency, saturation, alerts firing |
 | **Loki** | Structured log search, Kubernetes-native logs via label selectors |
 | **Elasticsearch** | App logs if ES instances are configured |
+| **AWS** | EC2 health, ECS task failures, ELB target health, CloudWatch alarms, CloudTrail events |
 
 Check which instances are configured:
 - `~/.claude/prometheus-instances.json`
 - `~/.claude/loki-instances.json`
 - `~/.claude/elasticsearch-instances.json`
+- `~/.claude/aws-instances.json`
 
-Only spawn agents for configured systems (or URL provided in message). Skip unconfigured ones silently — mention in final report if relevant.
+Only spawn agents for configured systems (or URL/profile provided in message). Skip unconfigured ones silently — mention in final report if relevant.
 
 ## Step 3: Spawn Subagents in Parallel
 
@@ -99,6 +101,24 @@ Run these searches:
 Return: error log samples (5-10 most relevant), error patterns, first/last occurrence times.
 ```
 
+**AWS subagent prompt template:**
+```
+You are an AWS infrastructure investigator. Use the aws-investigator skill.
+
+Task: Investigate [SERVICE] issue in AWS [PROFILE/REGION].
+Focus: [SYMPTOM — EC2 down, ECS task failing, ALB unhealthy targets, alarms firing, etc.]
+Time context: [TIME RANGE]
+
+Run these checks and report findings:
+1. Any ALARM-state CloudWatch alarms related to [SERVICE]
+2. ECS service status if applicable (desired vs running count, recent events)
+3. ELB target health if applicable (unhealthy targets + reason)
+4. CloudTrail: recent changes to [SERVICE] resources in [TIME RANGE]
+5. CloudWatch Logs: errors in relevant log group in [TIME RANGE]
+
+Return: resource state, anomalies, timeline of changes, suspected cause.
+```
+
 **Elasticsearch subagent prompt template:**
 ```
 You are an Elasticsearch log search expert. Use the elasticsearch skill.
@@ -128,6 +148,9 @@ After all subagents complete, write a unified incident report:
 
 ### Kubernetes
 [Key findings from K8s subagent — pod state, restarts, events]
+
+### AWS Infrastructure
+[EC2/ECS/ELB state, CloudWatch alarms, CloudTrail changes]
 
 ### Metrics (Prometheus)
 [Error rate, latency, any anomalies]

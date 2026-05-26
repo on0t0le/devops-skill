@@ -21,6 +21,23 @@ Multi-system incident investigation orchestrator. Spawns parallel Haiku subagent
 
 ---
 
+### `aws-investigator/`
+
+Read-only AWS investigation via AWS CLI. Multiple named profiles/regions with persistent config.
+
+**Covers:** EC2, CloudWatch Logs/Metrics/Alarms, CloudTrail, ELB/ALB target health, ECS tasks, RDS, Lambda.
+
+**Config:** `~/.claude/aws-instances.json` (profile + region per named env)
+
+**Example prompts:**
+- `check EC2 instances in prod`
+- `who deleted the security group yesterday`
+- `show firing CloudWatch alarms`
+- `check ECS service payments in staging`
+- `query CloudWatch logs for errors in /aws/lambda/my-function last hour`
+
+---
+
 ### `prometheus/`
 
 Query Prometheus (and VictoriaMetrics, Thanos, Cortex, Mimir) via `curl`. Multiple named instances with persistent config.
