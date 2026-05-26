@@ -2,10 +2,38 @@
 
 Claude Code skills for DevOps workflows.
 
-**Install all skills:**
+## Installation
+
+**Via Claude Code CLI** (terminal):
 
 ```bash
 claude plugin install https://github.com/on0t0le/devops-skill
+```
+
+**From within a Claude Code session** — type this as a prompt:
+
+```
+! claude plugin install https://github.com/on0t0le/devops-skill
+```
+
+The `!` prefix runs the command in your shell and pipes output back into the conversation.
+
+**Update to latest:**
+
+```bash
+claude plugin update devops-skill
+```
+
+**Manual (symlink for live edits):**
+
+```bash
+git clone https://github.com/on0t0le/devops-skill
+ln -s $(pwd)/devops-skill/skills/elasticsearch ~/.claude/skills/elasticsearch
+ln -s $(pwd)/devops-skill/skills/loki ~/.claude/skills/loki
+ln -s $(pwd)/devops-skill/skills/prometheus ~/.claude/skills/prometheus
+ln -s $(pwd)/devops-skill/skills/kubernetes-investigator ~/.claude/skills/kubernetes-investigator
+ln -s $(pwd)/devops-skill/skills/aws-investigator ~/.claude/skills/aws-investigator
+ln -s $(pwd)/devops-skill/skills/investigate ~/.claude/skills/investigate
 ```
 
 ## Skills
