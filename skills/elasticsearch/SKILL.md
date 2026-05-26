@@ -58,7 +58,7 @@ curl -s -u "user:pass" -X GET "http://HOST:PORT/INDEX/_search" \
   -d '{"query": {...}}'
 ```
 
-Always use `-s` (silent). Pipe through `| python3 -m json.tool` or `| jq .` for readable output if available.
+Always use `-s` (silent). Pipe through `| jq .` for readable output.
 
 ## Operations
 

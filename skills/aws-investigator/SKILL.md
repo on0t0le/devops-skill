@@ -14,7 +14,9 @@ description: >
   "asg", "auto scaling", "scale in", "scale out", "eks", "node group", "eks cluster",
   "cloudfront", "cdn", "distribution", "cache hit", "origin error", "cloudfront 5xx",
   "spot", "spot instance", "spot interrupted", "capacity-not-available", "spot price",
-  "spot shortage", "insufficient capacity", "spot fleet", "spot termination".
+  "spot shortage", "insufficient capacity", "spot fleet", "spot termination",
+  "replication lag", "replica lag", "rds lag", "replication slot", "inactive slot",
+  "storage full", "rds storage", "wal accumulation".
 trigger: /aws
 ---
 
@@ -67,7 +69,12 @@ aws --profile PROFILE --region REGION <subcommand>
 AWS_PROFILE=PROFILE aws --region REGION <subcommand>
 ```
 
-Always add `--output json` for structured output, pipe through `| jq .` for readability.
+Prefer `--output text` with `--query` (JMESPath) for reliable parsing. `--output json | jq` may silently produce malformed output in environments with CLI proxies (rtk, etc.) — fall back to `--output text` if jq parse errors occur.
+
+**rtk proxy**: if `rtk` is active and transforming output, prefix with `rtk proxy` to get raw JSON:
+```bash
+rtk proxy aws ... --output json | jq '.Key'
+```
 
 ## Operations
 
@@ -180,11 +187,12 @@ QUERY_ID=$(aws logs start-query [--profile P] [--region R] \
   --query-string 'fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 20' \
   --output text --query queryId)
 
-# Wait and get results
-sleep 3
+# Wait and get results (use sleep 5 minimum; 7-8 for long time ranges like 24h+)
+sleep 5
 aws logs get-query-results [--profile P] [--region R] \
   --query-id "$QUERY_ID" \
   --output json | jq '.results[] | map({(.field): .value}) | add'
+# If status=Running, sleep more and retry get-query-results
 ```
 
 Common Logs Insights patterns:
@@ -329,7 +337,29 @@ aws rds describe-db-instances [--profile P] [--region R] \
   --query 'DBInstances[].{ID:DBInstanceIdentifier, Class:DBInstanceClass, Engine:Engine, Status:DBInstanceStatus, Endpoint:Endpoint.Address}' \
   --output table
 
-# Recent events (last 1 hour)
+# Single instance detail — check replicas, storage, IOPS
+rtk proxy aws rds describe-db-instances [--profile P] [--region R] \
+  --db-instance-identifier DB_ID \
+  --output json 2>&1 | jq '.DBInstances[0] | {
+  DBInstanceIdentifier,DBInstanceClass,Engine,EngineVersion,
+  DBInstanceStatus,MultiAZ,
+  ReadReplicaSourceDBInstanceIdentifier,
+  ReadReplicaDBInstanceIdentifiers,
+  StorageType,AllocatedStorage,Iops,MaxAllocatedStorage,
+  BackupRetentionPeriod
+}'
+# ReadReplicaDBInstanceIdentifiers — replicas of this instance (primary)
+# ReadReplicaSourceDBInstanceIdentifier — this IS a replica; value = primary name
+# MaxAllocatedStorage == AllocatedStorage → autoscale ceiling hit, storage cannot grow
+
+# Events for specific instance (last 24h = 1440 min)
+aws rds describe-events [--profile P] [--region R] \
+  --source-identifier DB_ID \
+  --source-type db-instance \
+  --duration 1440 \
+  --output json | jq '.Events[] | {Time: .Date, Message: .Message}' | sort
+
+# Recent events all instances (last 1 hour)
 aws rds describe-events [--profile P] [--region R] \
   --duration 60 \
   --output json | jq '.Events[] | {Time: .Date, Source: .SourceIdentifier, Message: .Message}'
@@ -338,6 +368,85 @@ aws rds describe-events [--profile P] [--region R] \
 aws rds describe-db-clusters [--profile P] [--region R] \
   --query 'DBClusters[].{ID:DBClusterIdentifier, Status:Status, Engine:Engine, Members:DBClusterMembers}' \
   --output json | jq .
+```
+
+### RDS Replication Lag Investigation
+
+**ReplicaLag metric is on the REPLICA instance, not the primary.**
+
+```bash
+# Step 1: identify primary → find read replicas
+# (ReadReplicaDBInstanceIdentifiers in describe-db-instances output)
+
+# Step 2: ReplicaLag on replica (last 3h)
+aws cloudwatch get-metric-statistics [--profile P] [--region R] \
+  --namespace AWS/RDS \
+  --metric-name ReplicaLag \
+  --dimensions Name=DBInstanceIdentifier,Value=REPLICA_ID \
+  --start-time $(date -u -v-3H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%SZ) \
+  --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  --period 300 --statistics Average Maximum \
+  --output json | jq '[.Datapoints | sort_by(.Timestamp)[] | {Time: .Timestamp, Avg: .Average, Max: .Maximum}]'
+
+# Step 3: storage + I/O on PRIMARY (high DiskQueueDepth slows WAL shipping)
+for metric in FreeStorageSpace WriteIOPS DiskQueueDepth; do
+  echo "=== $metric ==="
+  aws cloudwatch get-metric-statistics [--profile P] [--region R] \
+    --namespace AWS/RDS --metric-name $metric \
+    --dimensions Name=DBInstanceIdentifier,Value=PRIMARY_ID \
+    --start-time $(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ) \
+    --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+    --period 300 --statistics Average Maximum --output json | \
+    jq '[.Datapoints | sort_by(.Timestamp)[-3:] | .[] | {Time: .Timestamp, Avg: .Average, Max: .Maximum}]'
+done
+
+# Step 4: same metrics on REPLICA (DiskQueueDepth + ReadIOPS — apply worker I/O)
+for metric in FreeStorageSpace ReadIOPS DiskQueueDepth CPUUtilization; do
+  echo "=== $metric (replica) ==="
+  aws cloudwatch get-metric-statistics [--profile P] [--region R] \
+    --namespace AWS/RDS --metric-name $metric \
+    --dimensions Name=DBInstanceIdentifier,Value=REPLICA_ID \
+    --start-time $(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ) \
+    --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+    --period 300 --statistics Average Maximum --output json | \
+    jq '[.Datapoints | sort_by(.Timestamp)[-3:] | .[] | {Time: .Timestamp, Avg: .Average, Max: .Maximum}]'
+done
+
+# Step 5: check RDS events for storage warnings and slot alerts
+aws rds describe-events [--profile P] [--region R] \
+  --source-identifier PRIMARY_ID --source-type db-instance \
+  --duration 1440 \
+  --output json | jq '.Events[] | {Time: .Date, Message: .Message}'
+# Key warnings:
+# "Storage size NNN GiB is approaching the maximum storage threshold" → autoscale ceiling hit
+# "Inactive replication slots have been detected" → logical slot holding WAL, burning storage
+# "free storage capacity ... is low" → urgent, may cause crash
+```
+
+**RDS replication lag root causes (in order of likelihood):**
+
+| Cause | Signal | Fix |
+|---|---|---|
+| Inactive logical replication slot on primary | RDS event: "Inactive replication slots" + FreeStorageSpace draining fast | Fix/drop slot consumer |
+| Primary DiskQueueDepth > 20 | WriteIOPS high, DiskQueueDepth elevated | Increase IOPS or storage |
+| Replica IOPS ceiling hit | Replica ReadIOPS near provisioned limit + DiskQueueDepth elevated | Increase replica IOPS |
+| Replica undersized vs primary | Replica class < primary class | Upsize replica |
+| Storage autoscale ceiling hit | `MaxAllocatedStorage == AllocatedStorage` | Increase max storage threshold |
+
+**Storage drain rate calculation:**
+```
+# If FreeStorageSpace drops 28 GiB in 25 min → ~1.1 GiB/min → hours until full:
+# hours = FreeStorageSpace_GiB / (drop_GiB / minutes) / 60
+```
+
+**Inactive replication slot investigation (SQL on primary):**
+```sql
+SELECT slot_name, active, active_pid,
+  pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained_wal,
+  confirmed_flush_lsn
+FROM pg_replication_slots ORDER BY restart_lsn;
+-- retained_wal = how much WAL this slot is holding hostage
+-- active = false AND active_pid IS NULL → consumer disconnected
 ```
 
 ### Lambda
@@ -488,7 +597,7 @@ Key /28 prefix issues:
 - Fix options: add secondary CIDR to VPC, expand subnet, add new subnet to nodegroup
 - Check `ENABLE_PREFIX_DELEGATION=true` in `aws-node` DaemonSet via `kubectl`
 
-
+### Spot Instances
 
 ```bash
 # List active spot instance requests
@@ -561,8 +670,9 @@ Key Spot issues:
 - High spot price in all AZs → capacity crunch in region; consider different instance family
 - ASG `SpotAllocationStrategy` — prefer `capacity-optimized` over `lowest-price` for availability
 - `SpotMaxPrice` set → can cause `price-too-low`; remove cap to use on-demand price ceiling
+- `UnfulfillableCapacity` in single-subnet nodegroup → add subnets from other AZs; spot price history confirms which AZs have capacity
 
-
+### Auto Scaling Groups
 
 ```bash
 # List ASGs
@@ -613,10 +723,13 @@ aws eks describe-cluster [--profile P] [--region R] \
   --name CLUSTER_NAME \
   --output json | jq '.cluster | {Name: .name, Status: .status, Version: .version, Endpoint: .endpoint, Health: .health, PlatformVersion: .platformVersion}'
 
+# Discover cluster names first — never assume the name
+aws eks list-clusters [--profile P] [--region R] --output text
+
 # List node groups
 aws eks list-nodegroups [--profile P] [--region R] \
   --cluster-name CLUSTER_NAME \
-  --output json | jq '.nodegroups[]'
+  --output text
 
 # Node group status + scaling
 aws eks describe-nodegroup [--profile P] [--region R] \
@@ -667,11 +780,18 @@ aws cloudwatch get-metric-statistics [--profile P] [--region R] \
   --output json | jq '[.Datapoints | sort_by(.Timestamp)[] | {Time: .Timestamp, CPU: .Average}]'
 ```
 
+# Find ASG for an EKS nodegroup by tag
+aws autoscaling describe-auto-scaling-groups [--profile P] [--region R] \
+  --filters Name=tag:eks:nodegroup-name,Values=NODEGROUP_NAME \
+  --query 'AutoScalingGroups[].AutoScalingGroupName' \
+  --output text
+
 Key EKS issues to check:
 - Cluster `status != ACTIVE` → upgrade or degraded
-- Nodegroup `status != ACTIVE` → `health.issues` has the reason (e.g. `Ec2LaunchTemplateNotFound`, `NodeCreationFailure`)
+- Nodegroup `status != ACTIVE` → `health.issues` has the reason (e.g. `Ec2LaunchTemplateNotFound`, `NodeCreationFailure`, `AsgInstanceLaunchFailures`)
 - Add-on `status != ACTIVE` → version conflict or IAM issue
 - Node group `desiredSize > maxSize` → can't scale (quota or config)
+- `AsgInstanceLaunchFailures` + `UnfulfillableCapacity` + single subnet → AZ diversity problem; check spot price history across all AZs, add subnets from other AZs
 
 ### CloudFront
 
@@ -755,6 +875,9 @@ Key CloudFront issues:
 - Spot: `capacity-not-available` → widen instance type pool, don't just retry same type
 - VPC CNI: always sort subnets by `AvailableIPs` ascending — exhausted ones surface immediately
 - VPC CNI /28: `AvailableIPs >= 16` necessary but not sufficient — fragmentation can still block allocation
+- RDS: check both primary and replica metrics; ReplicaLag on replica, WriteIOPS/DiskQueueDepth on primary
+- RDS: always check events for "Inactive replication slots" and storage warnings when lag is high
+- RDS: `MaxAllocatedStorage == AllocatedStorage` → storage can't autogrow, treat as urgent
 - If command fails with error → quote exact error, suggest fix (wrong region, missing permission, resource not found)
 
 ## Config Management (`/aws config`)

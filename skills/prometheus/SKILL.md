@@ -54,7 +54,7 @@ curl -s -u "user:pass" "http://HOST:PORT/api/v1/ENDPOINT"
 curl -s -H "Authorization: Bearer TOKEN" "http://HOST:PORT/api/v1/ENDPOINT"
 ```
 
-Always pipe through `| jq .` or `| python3 -m json.tool` for readability.  
+Always pipe through `| jq .` for readability.  
 All Prometheus API responses: `{"status":"success","data":{...}}` — check `status` first.
 
 ## Kubernetes Namespace Label Pitfall

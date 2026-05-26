@@ -47,7 +47,7 @@ If unsure whether a command is read-only — skip it.
 
 ## Diagnostic Workflow
 
-Work top-down. Stop and report as soon as root cause found — don't run all steps blindly.
+Work top-down. Stop and report as soon as root cause found — don't run all steps blindly. Run steps 1 and 2 in parallel when pod name and namespace are both known.
 
 ### 1. Identify Target
 
@@ -162,6 +162,27 @@ kubectl describe rs <RS_NAME> -n <NS>
 kubectl rollout history deployment/<WORKLOAD> -n <NS>
 ```
 
+### 5b. Pending Pod — Node Label Cross-Check
+
+When pod is Pending due to `didn't match Pod's node affinity/selector`:
+
+```bash
+# What labels does the pod require?
+kubectl get pod <NAME> -n <NS> -o json | jq '{
+  nodeSelector: .spec.nodeSelector,
+  nodeAffinity: .spec.affinity.nodeAffinity,
+  tolerations: .spec.tolerations
+}'
+
+# What labels actually exist on nodes?
+kubectl get nodes -o json | jq '.items[] | {name: .metadata.name, labels: .metadata.labels, taints: .spec.taints}'
+
+# Quick: does any node have the required label?
+kubectl get nodes -l <KEY>=<VALUE>
+```
+
+If zero nodes match the required label → node group doesn't exist or was never created. Cross-check AWS EKS node group labels and status.
+
 ### 6. Node & Resource Pressure
 
 ```bash
@@ -217,7 +238,7 @@ kubectl get deploy,sts,ds,jobs -n <NS>
 |---|---|---|
 | `CrashLoopBackOff` | `logs --previous` | App error, missing config, OOM |
 | `OOMKilled` (exit 137) | `describe` limits, `top pod` | Memory limit too low or leak |
-| `Pending` (no node) | `describe` Events | Insufficient CPU/mem, no matching node, taints |
+| `Pending` (no node) | `describe` Events, node labels | Insufficient CPU/mem, no matching node, taints, missing node label |
 | `ImagePullBackOff` | `describe` Events | Wrong image tag, missing imagePullSecret |
 | `Init:CrashLoopBackOff` | init container logs | Init script failing, dependency not ready |
 | `CreateContainerConfigError` | `describe` Events | Missing ConfigMap or Secret |
