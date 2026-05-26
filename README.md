@@ -25,7 +25,7 @@ Multi-system incident investigation orchestrator. Spawns parallel Haiku subagent
 
 Read-only AWS investigation via AWS CLI. Multiple named profiles/regions with persistent config.
 
-**Covers:** EC2, CloudWatch Logs/Metrics/Alarms, CloudTrail, ELB/ALB target health, ECS tasks, RDS, Lambda.
+**Covers:** EC2, CloudWatch Logs/Metrics/Alarms, CloudTrail, ELB/ALB/NLB target health, ASG scaling activity, EKS cluster/nodegroup health, CloudFront distributions + metrics, ECS tasks, RDS, Lambda.
 
 **Config:** `~/.claude/aws-instances.json` (profile + region per named env)
 

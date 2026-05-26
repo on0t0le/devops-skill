@@ -8,7 +8,9 @@ description: >
   infrastructure issue. Supports multiple named profiles and regions.
   Never modifies AWS resources.
   Trigger: /aws, "investigate aws", "check ec2", "cloudwatch logs", "cloudtrail",
-  "who deleted", "elb health", "ecs task", "rds status", "aws issue", "check alarms".
+  "who deleted", "elb health", "ecs task", "rds status", "aws issue", "check alarms",
+  "asg", "auto scaling", "scale in", "scale out", "eks", "node group", "eks cluster",
+  "cloudfront", "cdn", "distribution", "cache hit", "origin error", "cloudfront 5xx".
 trigger: /aws
 ---
 
@@ -210,22 +212,75 @@ aws cloudtrail lookup-events [--profile P] [--region R] \
 # DeleteBucket, PutBucketPolicy, CreateUser, AttachRolePolicy, DeleteStack
 ```
 
-### ELB / ALB
+### ELB / ALB / NLB
+
+`elbv2` covers both ALB (Application) and NLB (Network). Classic ELB uses `elb`.
 
 ```bash
-# List load balancers
+# List all load balancers (ALB + NLB)
 aws elbv2 describe-load-balancers [--profile P] [--region R] \
-  --query 'LoadBalancers[].{Name:LoadBalancerName, DNS:DNSName, State:State.Code, Type:Type}' \
+  --query 'LoadBalancers[].{Name:LoadBalancerName, DNS:DNSName, State:State.Code, Type:Type, Scheme:Scheme}' \
   --output table
 
-# Target group health
-aws elbv2 describe-target-groups [--profile P] [--region R] \
-  --output json | jq '.TargetGroups[] | {Name: .TargetGroupName, ARN: .TargetGroupArn}'
+# Single LB detail
+aws elbv2 describe-load-balancers [--profile P] [--region R] \
+  --names LB_NAME \
+  --output json | jq '.LoadBalancers[] | {Name: .LoadBalancerName, Type: .Type, State: .State, DNS: .DNSName, AZs: [.AvailabilityZones[].ZoneName]}'
 
+# List target groups (all or for specific LB)
+aws elbv2 describe-target-groups [--profile P] [--region R] \
+  --output json | jq '.TargetGroups[] | {Name: .TargetGroupName, ARN: .TargetGroupArn, Protocol: .Protocol, Port: .Port, HealthCheck: .HealthCheckPath}'
+
+# Target health — works for ALB and NLB
 aws elbv2 describe-target-health [--profile P] [--region R] \
   --target-group-arn ARN \
-  --output json | jq '.TargetHealthDescriptions[] | {Target: .Target.Id, State: .TargetHealth.State, Reason: .TargetHealth.Reason, Description: .TargetHealth.Description}'
+  --output json | jq '.TargetHealthDescriptions[] | {Target: .Target.Id, Port: .Target.Port, State: .TargetHealth.State, Reason: .TargetHealth.Reason, Description: .TargetHealth.Description}'
+
+# NLB-specific: describe listener + rules
+aws elbv2 describe-listeners [--profile P] [--region R] \
+  --load-balancer-arn LB_ARN \
+  --output json | jq '.Listeners[] | {Port: .Port, Protocol: .Protocol, DefaultActions: .DefaultActions}'
+
+# ALB access logs location (if enabled)
+aws elbv2 describe-load-balancer-attributes [--profile P] [--region R] \
+  --load-balancer-arn LB_ARN \
+  --output json | jq '[.Attributes[] | select(.Key | startswith("access_logs"))]'
+
+# Classic ELB (legacy)
+aws elb describe-load-balancers [--profile P] [--region R] \
+  --query 'LoadBalancerDescriptions[].{Name:LoadBalancerName, DNS:DNSName, Instances:length(Instances)}' \
+  --output table
+
+aws elb describe-instance-health [--profile P] [--region R] \
+  --load-balancer-name ELB_NAME \
+  --output json | jq '.InstanceStates[] | {Instance: .InstanceId, State: .State, ReasonCode: .ReasonCode, Description: .Description}'
+
+# CloudWatch metrics for ALB (HTTPCode_ELB_5XX_Count, TargetResponseTime, HealthyHostCount)
+aws cloudwatch get-metric-statistics [--profile P] [--region R] \
+  --namespace AWS/ApplicationELB \
+  --metric-name HTTPCode_ELB_5XX_Count \
+  --dimensions Name=LoadBalancer,Value=app/LB_NAME/HASH \
+  --start-time $(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ) \
+  --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  --period 300 --statistics Sum \
+  --output json | jq '[.Datapoints | sort_by(.Timestamp)[] | {Time: .Timestamp, Count: .Sum}]'
+
+# NLB metrics (namespace: AWS/NetworkELB)
+aws cloudwatch get-metric-statistics [--profile P] [--region R] \
+  --namespace AWS/NetworkELB \
+  --metric-name UnHealthyHostCount \
+  --dimensions Name=LoadBalancer,Value=net/LB_NAME/HASH Name=TargetGroup,Value=targetgroup/TG_NAME/HASH \
+  --start-time $(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ) \
+  --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  --period 300 --statistics Maximum \
+  --output json | jq '[.Datapoints | sort_by(.Timestamp)[] | {Time: .Timestamp, Unhealthy: .Maximum}]'
 ```
+
+Key LB issues:
+- `TargetHealth.State != healthy` → check `Reason`: `Target.FailedHealthChecks`, `Target.NotRegistered`, `Target.DeregistrationInProgress`
+- NLB unhealthy target with no `Reason` → security group blocking health check port (NLBs don't modify SGs)
+- ALB `HTTPCode_ELB_5XX` → LB itself erroring (504=origin timeout, 502=bad response)
+- `HealthyHostCount = 0` → all targets down — check ASG, ECS, or EC2 state
 
 ### ECS
 
@@ -298,6 +353,184 @@ aws cloudwatch get-metric-statistics [--profile P] [--region R] \
   --output json | jq '[.Datapoints[] | {Time: .Timestamp, Errors: .Sum}] | sort_by(.Time)'
 ```
 
+### Auto Scaling Groups (ASG)
+
+```bash
+# List ASGs
+aws autoscaling describe-auto-scaling-groups [--profile P] [--region R] \
+  --query 'AutoScalingGroups[].{Name:AutoScalingGroupName, Min:MinSize, Max:MaxSize, Desired:DesiredCapacity, Running:length(Instances[?LifecycleState==`InService`])}' \
+  --output table
+
+# Single ASG detail (instances + health)
+aws autoscaling describe-auto-scaling-groups [--profile P] [--region R] \
+  --auto-scaling-group-names ASG_NAME \
+  --output json | jq '.AutoScalingGroups[] | {
+    Name: .AutoScalingGroupName,
+    Desired: .DesiredCapacity, Min: .MinSize, Max: .MaxSize,
+    Instances: [.Instances[] | {ID: .InstanceId, AZ: .AvailabilityZone, State: .LifecycleState, Health: .HealthStatus}],
+    SuspendedProcesses: [.SuspendedProcesses[].ProcessName]
+  }'
+
+# Recent scaling activity (last 20 events)
+aws autoscaling describe-scaling-activities [--profile P] [--region R] \
+  --auto-scaling-group-name ASG_NAME \
+  --max-items 20 \
+  --output json | jq '.Activities[] | {Time: .StartTime, Status: .StatusCode, Description: .Description, Cause: .Cause}'
+
+# Instances failing health checks
+aws autoscaling describe-auto-scaling-instances [--profile P] [--region R] \
+  --output json | jq '[.AutoScalingInstances[] | select(.HealthStatus != "HEALTHY")] | .[] | {ID: .InstanceId, ASG: .AutoScalingGroupName, State: .LifecycleState, Health: .HealthStatus}'
+
+# Scheduled scaling actions
+aws autoscaling describe-scheduled-actions [--profile P] [--region R] \
+  --auto-scaling-group-name ASG_NAME \
+  --output table
+```
+
+Key ASG issues to check:
+- `SuspendedProcesses` — Launch/Terminate suspended → ASG won't scale
+- `HealthStatus != HEALTHY` → instances being replaced
+- Scaling activity `WaitingForELBConnectionDraining` → slow scale-in
+- Activity `StatusCode: Failed` → launch failure (bad AMI, quota, insufficient capacity)
+
+### EKS
+
+```bash
+# List clusters
+aws eks list-clusters [--profile P] [--region R] --output json | jq '.clusters[]'
+
+# Cluster status + version
+aws eks describe-cluster [--profile P] [--region R] \
+  --name CLUSTER_NAME \
+  --output json | jq '.cluster | {Name: .name, Status: .status, Version: .version, Endpoint: .endpoint, Health: .health, PlatformVersion: .platformVersion}'
+
+# List node groups
+aws eks list-nodegroups [--profile P] [--region R] \
+  --cluster-name CLUSTER_NAME \
+  --output json | jq '.nodegroups[]'
+
+# Node group status + scaling
+aws eks describe-nodegroup [--profile P] [--region R] \
+  --cluster-name CLUSTER_NAME \
+  --nodegroup-name NODEGROUP_NAME \
+  --output json | jq '.nodegroup | {
+    Name: .nodegroupName, Status: .status,
+    Desired: .scalingConfig.desiredSize, Min: .scalingConfig.minSize, Max: .scalingConfig.maxSize,
+    InstanceType: .instanceTypes,
+    AmiType: .amiType, Version: .version, ReleaseVersion: .releaseVersion,
+    Health: .health
+  }'
+
+# Node group health issues
+aws eks describe-nodegroup [--profile P] [--region R] \
+  --cluster-name CLUSTER_NAME \
+  --nodegroup-name NODEGROUP_NAME \
+  --output json | jq '.nodegroup.health.issues'
+
+# List Fargate profiles
+aws eks list-fargate-profiles [--profile P] [--region R] \
+  --cluster-name CLUSTER_NAME \
+  --output json | jq '.fargateProfileNames[]'
+
+aws eks describe-fargate-profile [--profile P] [--region R] \
+  --cluster-name CLUSTER_NAME \
+  --fargate-profile-name PROFILE_NAME \
+  --output json | jq '.fargateProfile | {Status: .status, Selectors: .selectors, Health: .health}'
+
+# Add-ons status
+aws eks list-addons [--profile P] [--region R] \
+  --cluster-name CLUSTER_NAME \
+  --output json | jq '.addons[]'
+
+aws eks describe-addon [--profile P] [--region R] \
+  --cluster-name CLUSTER_NAME \
+  --addon-name ADDON_NAME \
+  --output json | jq '.addon | {Name: .addonName, Status: .status, Version: .addonVersion, Health: .health}'
+
+# CloudWatch metrics for EKS node groups
+aws cloudwatch get-metric-statistics [--profile P] [--region R] \
+  --namespace AWS/EKS \
+  --metric-name node_cpu_utilization \
+  --dimensions Name=ClusterName,Value=CLUSTER_NAME \
+  --start-time $(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ) \
+  --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  --period 300 --statistics Average \
+  --output json | jq '[.Datapoints | sort_by(.Timestamp)[] | {Time: .Timestamp, CPU: .Average}]'
+```
+
+Key EKS issues to check:
+- Cluster `status != ACTIVE` → upgrade or degraded
+- Nodegroup `status != ACTIVE` → `health.issues` has the reason (e.g. `Ec2LaunchTemplateNotFound`, `NodeCreationFailure`)
+- Add-on `status != ACTIVE` → version conflict or IAM issue
+- Node group `desiredSize > maxSize` → can't scale (quota or config)
+
+### CloudFront
+
+```bash
+# List distributions
+aws cloudfront list-distributions [--profile P] \
+  --output json | jq '.DistributionList.Items[] | {
+    ID: .Id, Domain: .DomainName, Status: .Status, Enabled: .Enabled,
+    Origins: [.Origins.Items[].DomainName],
+    Aliases: (.Aliases.Items // [])
+  }'
+
+# Single distribution detail
+aws cloudfront get-distribution [--profile P] \
+  --id DISTRIBUTION_ID \
+  --output json | jq '.Distribution | {
+    Status: .Status,
+    DomainName: .DomainName,
+    Config: .DistributionConfig | {
+      Enabled: .Enabled,
+      PriceClass: .PriceClass,
+      HttpVersion: .HttpVersion,
+      DefaultCacheBehavior: .DefaultCacheBehavior | {ViewerProtocol: .ViewerProtocolPolicy, CachePolicy: .CachePolicyId, OriginRequestPolicy: .OriginRequestPolicyId},
+      Origins: [.Origins.Items[] | {ID: .Id, Domain: .DomainName, Protocol: .CustomOriginConfig.OriginProtocolPolicy}]
+    }
+  }'
+
+# CloudFront metrics (note: must use us-east-1 for CloudFront metrics)
+aws cloudwatch get-metric-statistics --region us-east-1 [--profile P] \
+  --namespace AWS/CloudFront \
+  --metric-name 5xxErrorRate \
+  --dimensions Name=DistributionId,Value=DIST_ID Name=Region,Value=Global \
+  --start-time $(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ) \
+  --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  --period 300 --statistics Average \
+  --output json | jq '[.Datapoints | sort_by(.Timestamp)[] | {Time: .Timestamp, ErrorRate: .Average}]'
+
+# All CloudFront metrics: Requests, BytesDownloaded, BytesUploaded,
+# 4xxErrorRate, 5xxErrorRate, TotalErrorRate, CacheHitRate, OriginLatency
+
+# Cache hit rate
+aws cloudwatch get-metric-statistics --region us-east-1 [--profile P] \
+  --namespace AWS/CloudFront \
+  --metric-name CacheHitRate \
+  --dimensions Name=DistributionId,Value=DIST_ID Name=Region,Value=Global \
+  --start-time $(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ) \
+  --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  --period 300 --statistics Average \
+  --output json | jq '[.Datapoints | sort_by(.Timestamp)[] | {Time: .Timestamp, HitRate: .Average}]'
+
+# Invalidation status (recent)
+aws cloudfront list-invalidations [--profile P] \
+  --distribution-id DISTRIBUTION_ID \
+  --output json | jq '.InvalidationList.Items[:5] | .[] | {ID: .Id, Status: .Status, Created: .CreateTime}'
+
+# CloudTrail: recent distribution changes (use us-east-1 — CF events go there)
+aws cloudtrail lookup-events --region us-east-1 [--profile P] \
+  --lookup-attributes AttributeKey=ResourceName,AttributeValue=DISTRIBUTION_ID \
+  --output json | jq '.Events[] | {Time: .EventTime, Event: .EventName, User: .Username}'
+```
+
+Key CloudFront issues:
+- `5xxErrorRate` spike → origin returning errors; check origin (EC2/ALB/S3) health
+- `CacheHitRate` drop → cache-busting headers, TTL=0, or query string variation
+- `Status: InProgress` → distribution updating (takes 5-15 min)
+- Invalidation `InProgress` → cache clearing in flight
+- **Note:** CloudFront metrics only available in `us-east-1` regardless of distribution region
+
 ## Output Formatting
 
 - Tables for lists (use `--output table` or `jq` table-like format)
@@ -305,6 +538,10 @@ aws cloudwatch get-metric-statistics [--profile P] [--region R] \
 - CloudTrail: show time, actor, action, resource — sorted by time
 - Alarms: ALARM state first, then INSUFFICIENT_DATA, then OK
 - ECS: highlight Desired≠Running mismatches
+- ASG: highlight SuspendedProcesses, Failed activities, unhealthy instances
+- EKS: highlight non-ACTIVE nodegroups with health.issues details
+- CloudFront: always use `us-east-1` for metrics; note deployment takes 5-15 min
+- NLB: check SG rules when targets show unhealthy with no reason
 - If command fails with error → quote exact error, suggest fix (wrong region, missing permission, resource not found)
 
 ## Config Management (`/aws config`)
