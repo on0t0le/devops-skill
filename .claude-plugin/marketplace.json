@@ -5,27 +5,30 @@
     "name": "on0t0le"
   },
   "metadata": {
-    "description": "DevOps skills for Claude Code — Elasticsearch log querying and more.",
+    "description": "DevOps skills for Claude Code — Elasticsearch, Prometheus, Loki, Kubernetes, AWS, and parallel incident investigation.",
     "version": "1.0.0"
   },
   "plugins": [
     {
       "name": "devops-skill",
       "source": "./",
-      "description": "DevOps skills: Elasticsearch/OpenSearch log querying via curl, multi-instance config, index listing, log search with filters and time ranges.",
-      "version": "1.0.0",
+      "description": "DevOps investigation skills: Elasticsearch/OpenSearch, Prometheus, Loki, Kubernetes, AWS — all via curl/CLI. Multi-instance config. Parallel incident orchestrator.",
+      "version": "1.1.0",
       "author": {
-        "name": "abuhrovyi"
+        "name": "on0t0le"
       },
       "license": "MIT",
       "category": "devops",
       "keywords": [
         "elasticsearch",
-        "opensearch",
-        "logs",
+        "prometheus",
+        "loki",
+        "kubernetes",
+        "aws",
         "devops",
-        "curl",
-        "observability"
+        "observability",
+        "incident-investigation",
+        "curl"
       ],
       "skills": "./skills/"
     }
