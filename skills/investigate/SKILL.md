@@ -53,7 +53,7 @@ Each subagent uses `model: haiku` to minimize token cost.
 
 **Kubernetes subagent prompt template:**
 ```
-You are a Kubernetes diagnostics expert. Use the kubernetes-expert skill.
+You are a Kubernetes diagnostics expert. Use the kubernetes-investigator skill.
 
 Task: Investigate [SERVICE/POD] in namespace [NAMESPACE].
 Focus: [SYMPTOM — pod restarts, OOM, Pending, etc.]

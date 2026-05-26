@@ -36,11 +36,18 @@ If a command is ambiguous, use `--dry-run` or skip it.
 
 Resolve target in this order:
 
-1. **Named config in message** — "prod", "staging" → look up in `~/.claude/aws-instances.json`
-2. **Profile in message** — "use profile dev" → `--profile dev`
-3. **Region in message** — "eu-west-1" → `--region eu-west-1`
-4. **Config default** — `~/.claude/aws-instances.json` default entry
-5. **AWS CLI default** — whatever `aws configure` has set
+1. **Profile/env in message** — "use profile dev", "in prod account", "staging" → `--profile NAME`
+2. **Region in message** — "eu-west-1", "in us-east-1" → `--region REGION`
+3. **Named config** — look up in `~/.claude/aws-instances.json` if name matches
+4. **Config default** — `~/.claude/aws-instances.json` entry with `"default": true`
+5. **Current AWS environment** (default) — no `--profile` or `--region` flags; uses `AWS_PROFILE`, `AWS_DEFAULT_REGION` env vars or `[default]` profile from `~/.aws/credentials`
+
+Always show active identity at start of investigation:
+```bash
+aws sts get-caller-identity
+```
+
+If no profile specified and no config default, omit `--profile` and `--region` entirely — let the AWS CLI use its own defaults. Don't ask the user which account to use unless the command fails with a credentials error.
 
 Config file (`~/.claude/aws-instances.json`):
 ```json

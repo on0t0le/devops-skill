@@ -90,7 +90,7 @@ Query Grafana Loki (and Grafana Cloud Logs) via `curl`. Multiple named instances
 
 ---
 
-### `kubernetes-expert/`
+### `kubernetes-investigator/`
 
 Read-only Kubernetes diagnostics expert. Investigates Pod, Namespace, and Workload issues without touching cluster state.
 
