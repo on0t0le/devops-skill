@@ -1,8 +1,8 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "devops-skill",
+  "name": "on0t0le",
   "owner": {
-    "name": "abuhrovyi"
+    "name": "on0t0le"
   },
   "metadata": {
     "description": "DevOps skills for Claude Code — Elasticsearch log querying and more.",
