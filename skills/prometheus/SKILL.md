@@ -157,14 +157,20 @@ curl -s [AUTH] "http://HOST:PORT/api/v1/targets" \
   | jq '[.data.activeTargets[] | select(.labels.job | test("JOB_PATTERN"))] | {total: length, down: [.[] | select(.health != "up")] | length, unhealthy: [.[] | select(.health != "up")] | map({instance: .labels.instance, pod: .labels.instance, error: .lastError})}'
 ```
 
-**Namespace label gap**: Many jobs (JMX exporters, custom scrapers) do not populate `namespace` as a metric label even when pods live in a namespace. If `{namespace="..."}` filter returns empty:
-
-1. Drop the namespace filter — query by job name pattern instead
-2. Use targets API and filter by `instance` or pod name substring:
+**Namespace label naming**: Some jobs (e.g. JMX exporters via pod annotations) use `kubernetes_namespace` instead of `namespace`. If `{namespace="..."}` filter returns empty, retry with `kubernetes_namespace`:
 
 ```bash
-curl -s [AUTH] "http://HOST:PORT/api/v1/targets" \
-  | jq '[.data.activeTargets[] | select(.labels.instance | test("NAMESPACE_OR_APP_PATTERN"))] | .[] | {job: .labels.job, instance: .labels.instance, health: .health, lastError: .lastError}'
+# Try kubernetes_namespace if namespace returns empty
+curl -s [AUTH] -G "http://HOST:PORT/api/v1/query" \
+  --data-urlencode 'query=up{job="JOB_NAME", kubernetes_namespace="NAMESPACE"}' \
+  | jq '.data.result'
+```
+
+To discover which label name is used, inspect a known metric:
+```bash
+curl -s [AUTH] -G "http://HOST:PORT/api/v1/query" \
+  --data-urlencode 'query=up{job="JOB_NAME"}' \
+  | jq '.data.result[0].metric | keys'
 ```
 
 ### Alerts
@@ -280,7 +286,7 @@ Multiple, none default → list and ask.
 |---|---|---|
 | `connection refused` | Wrong host/port or Prometheus down | Check URL |
 | `bad_data` in response | Invalid PromQL syntax | Check expression |
-| `"result":[]` | Metric not found, wrong labels, or job doesn't populate `namespace` label | List metrics; if namespace filter used, retry without it and use targets API instead |
+| `"result":[]` | Metric not found, wrong labels, or wrong namespace label name (`namespace` vs `kubernetes_namespace`) | List metrics; inspect a known metric's label keys to find the correct namespace label name |
 | `execution: query processing would load too many samples` | Query too broad + long range | Narrow time range or add label filters |
 | 401 / 403 | Auth missing or wrong | Check auth config |
 | `invalid parameter "query"` | Missing URL encoding | Use `--data-urlencode` |
