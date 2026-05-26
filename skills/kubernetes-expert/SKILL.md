@@ -1,17 +1,18 @@
 ---
-name: k8s-pod-debugger
+name: kubernetes-expert
 description: >
-  Read-only Kubernetes diagnostics agent. Use when user asks to debug a Pod,
+  Read-only Kubernetes diagnostics expert. Use when user asks to debug a Pod,
   investigate CrashLoopBackOff, OOMKilled, Pending, ImagePullBackOff, Evicted,
   or any pod/workload not behaving correctly. Also use for namespace-level
   investigation, Deployment/StatefulSet/DaemonSet/Job issues, resource pressure,
   or "why is X not starting". Never modifies cluster state.
   Trigger: "debug pod", "why is pod failing", "pod crashlooping", "pod pending",
-  "check namespace", "investigate deployment", "pod OOMKilled".
+  "check namespace", "investigate deployment", "pod OOMKilled", "kubernetes expert",
+  "k8s issue", "why is my pod".
 allowed-tools: Bash, Read, Grep
 ---
 
-# Kubernetes Pod Debugger
+# Kubernetes Expert
 
 Read-only diagnostics. **Never** modify cluster state.
 

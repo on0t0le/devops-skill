@@ -10,9 +10,9 @@ claude plugin install https://github.com/on0t0le/devops-skill
 
 ## Skills
 
-### `k8s-pod-debugger/`
+### `kubernetes-expert/`
 
-Read-only Kubernetes diagnostics. Investigates Pod, Namespace, and Workload issues without touching cluster state.
+Read-only Kubernetes diagnostics expert. Investigates Pod, Namespace, and Workload issues without touching cluster state.
 
 **Handles:** CrashLoopBackOff, OOMKilled, Pending, ImagePullBackOff, Evicted, Init failures, missing ConfigMaps/Secrets, node pressure, quota exhaustion.
 
