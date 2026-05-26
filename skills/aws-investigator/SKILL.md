@@ -9,6 +9,8 @@ description: >
   Never modifies AWS resources.
   Trigger: /aws, "investigate aws", "check ec2", "cloudwatch logs", "cloudtrail",
   "who deleted", "elb health", "ecs task", "rds status", "aws issue", "check alarms",
+  "vpc", "subnet", "ip exhaustion", "no ip addresses", "/28", "prefix delegation",
+  "vpc cni", "eni limit", "nat gateway", "route table", "vpc issue",
   "asg", "auto scaling", "scale in", "scale out", "eks", "node group", "eks cluster",
   "cloudfront", "cdn", "distribution", "cache hit", "origin error", "cloudfront 5xx",
   "spot", "spot instance", "spot interrupted", "capacity-not-available", "spot price",
@@ -355,7 +357,131 @@ aws cloudwatch get-metric-statistics [--profile P] [--region R] \
   --output json | jq '[.Datapoints[] | {Time: .Timestamp, Errors: .Sum}] | sort_by(.Time)'
 ```
 
-### Spot Instances
+### VPC & Subnets (including EKS CNI /28 prefix issues)
+
+```bash
+# List VPCs
+aws ec2 describe-vpcs [--profile P] [--region R] \
+  --output json | jq '.Vpcs[] | {ID: .VpcId, CIDR: .CidrBlock, State: .State, Default: .IsDefault, Name: (.Tags[]? | select(.Key=="Name") | .Value)}'
+
+# List subnets with available IPs (critical for EKS CNI exhaustion)
+aws ec2 describe-subnets [--profile P] [--region R] \
+  --output json | jq '.Subnets[] | {
+    ID: .SubnetId,
+    Name: (.Tags[]? | select(.Key=="Name") | .Value),
+    AZ: .AvailabilityZone,
+    CIDR: .CidrBlock,
+    AvailableIPs: .AvailableIpAddressCount,
+    TotalIPs: ((.CidrBlock | split("/")[1] | tonumber) as $prefix | pow(2; 32 - $prefix) | floor - 5),
+    State: .State
+  }' | jq -s 'sort_by(.AvailableIPs)'
+
+# Filter subnets by VPC
+aws ec2 describe-subnets [--profile P] [--region R] \
+  --filters Name=vpc-id,Values=vpc-XXXXXXXXX \
+  --output json | jq '.Subnets[] | {ID: .SubnetId, AZ: .AvailabilityZone, CIDR: .CidrBlock, AvailableIPs: .AvailableIpAddressCount}'
+
+# Check /28 prefix delegations in subnet (EKS VPC CNI prefix mode)
+# Prefix delegation carves /28 blocks (16 IPs each) from the subnet
+aws ec2 describe-subnets [--profile P] [--region R] \
+  --subnet-ids subnet-XXXXXXXXX \
+  --output json | jq '.Subnets[] | {
+    CIDR: .CidrBlock,
+    AvailableIPs: .AvailableIpAddressCount,
+    PrefixesOf28Possible: (.AvailableIpAddressCount / 16 | floor),
+    Comment: (if .AvailableIpAddressCount < 16 then "CRITICAL: cannot allocate /28 prefix" elif .AvailableIpAddressCount < 64 then "WARNING: fewer than 4 /28 prefixes available" else "OK" end)
+  }'
+
+# List all ENIs in subnet (to find what's consuming IPs)
+aws ec2 describe-network-interfaces [--profile P] [--region R] \
+  --filters Name=subnet-id,Values=subnet-XXXXXXXXX \
+  --output json | jq '[.NetworkInterfaces[] | {ID: .NetworkInterfaceId, Description: .Description, Status: .Status, PrivateIP: .PrivateIpAddress, Attachment: .Attachment.InstanceId}] | length as $total | {TotalENIs: $total, ENIs: .}'
+
+# Find ENIs with prefix delegations (/28 blocks assigned to them)
+aws ec2 describe-network-interfaces [--profile P] [--region R] \
+  --filters Name=subnet-id,Values=subnet-XXXXXXXXX \
+  --output json | jq '[.NetworkInterfaces[] | select(.Ipv4Prefixes | length > 0) | {ID: .NetworkInterfaceId, Instance: .Attachment.InstanceId, Prefixes: [.Ipv4Prefixes[].Ipv4Prefix]}]'
+
+# Check VPC CNI prefix delegation config on EKS nodegroup
+# (reads DaemonSet env var — use kubectl, not AWS CLI)
+# kubectl get ds aws-node -n kube-system -o json | jq '.spec.template.spec.containers[0].env[] | select(.name == "ENABLE_PREFIX_DELEGATION")'
+
+# ENI/IP limits per instance type (important for VPC CNI capacity planning)
+aws ec2 describe-instance-types [--profile P] [--region R] \
+  --instance-types m5.large m5.xlarge m5.2xlarge \
+  --output json | jq '.InstanceTypes[] | {
+    Type: .InstanceType,
+    MaxENIs: .NetworkInfo.MaximumNetworkInterfaces,
+    MaxIPsPerENI: .NetworkInfo.Ipv4AddressesPerInterface,
+    MaxPrefixesPerENI: .NetworkInfo.MaximumNetworkCards,
+    TotalIPsWithoutPrefix: (.NetworkInfo.MaximumNetworkInterfaces * .NetworkInfo.Ipv4AddressesPerInterface),
+    TotalIPsWithPrefix: (.NetworkInfo.MaximumNetworkInterfaces * .NetworkInfo.Ipv4AddressesPerInterface * 16)
+  }'
+
+# VPC CIDR associations (secondary CIDRs)
+aws ec2 describe-vpcs [--profile P] [--region R] \
+  --vpc-ids vpc-XXXXXXXXX \
+  --output json | jq '.Vpcs[] | {CidrBlock: .CidrBlock, CidrAssociations: [.CidrBlockAssociationSet[] | {CIDR: .CidrBlock, State: .CidrBlockState.State}]}'
+
+# VPC flow logs (are they enabled? where do they go?)
+aws ec2 describe-flow-logs [--profile P] [--region R] \
+  --filter Name=resource-id,Values=vpc-XXXXXXXXX \
+  --output json | jq '.FlowLogs[] | {ID: .FlowLogId, Status: .FlowLogStatus, Destination: .LogDestination, TrafficType: .TrafficType}'
+
+# NAT Gateways state
+aws ec2 describe-nat-gateways [--profile P] [--region R] \
+  --output json | jq '.NatGateways[] | {ID: .NatGatewayId, VPC: .VpcId, Subnet: .SubnetId, State: .State, Type: .ConnectivityType}'
+
+# Route tables — check default route (0.0.0.0/0) exists
+aws ec2 describe-route-tables [--profile P] [--region R] \
+  --filters Name=vpc-id,Values=vpc-XXXXXXXXX \
+  --output json | jq '.RouteTables[] | {ID: .RouteTableId, Associations: [.Associations[].SubnetId], DefaultRoute: (.Routes[] | select(.DestinationCidrBlock == "0.0.0.0/0") | {Via: (.GatewayId // .NatGatewayId // .TransitGatewayId), State: .State})}'
+
+# Internet Gateway
+aws ec2 describe-internet-gateways [--profile P] [--region R] \
+  --filters Name=attachment.vpc-id,Values=vpc-XXXXXXXXX \
+  --output json | jq '.InternetGateways[] | {ID: .InternetGatewayId, State: .Attachments[0].State}'
+```
+
+**EKS VPC CNI /28 prefix investigation checklist:**
+
+```bash
+# Step 1: check which subnets EKS nodes use
+aws eks describe-nodegroup [--profile P] [--region R] \
+  --cluster-name CLUSTER --nodegroup-name NODEGROUP \
+  --output json | jq '.nodegroup.subnets'
+
+# Step 2: for each subnet — check available IPs and /28 capacity
+aws ec2 describe-subnets [--profile P] [--region R] \
+  --subnet-ids subnet-AAA subnet-BBB \
+  --output json | jq '.Subnets[] | {
+    ID: .SubnetId, AZ: .AvailabilityZone,
+    AvailableIPs: .AvailableIpAddressCount,
+    CanAllocate28: (.AvailableIpAddressCount >= 16),
+    Prefixes28Available: (.AvailableIpAddressCount / 16 | floor)
+  }'
+
+# Step 3: check if prefix delegation is enabled on VPC CNI
+# (requires kubectl — mention to user if AWS CLI insufficient)
+
+# Step 4: check ENIs already holding prefixes in those subnets
+aws ec2 describe-network-interfaces [--profile P] [--region R] \
+  --filters Name=subnet-id,Values=subnet-AAA \
+  --output json | jq '[.NetworkInterfaces[] | select(.Ipv4Prefixes | length > 0)] | length as $count | "ENIs with /28 prefixes: \($count)"'
+
+# Step 5: check if subnet is in RFC1918 range that supports /28
+# /28 requires at least 16 contiguous free IPs — fragmented subnets may fail
+# even with AvailableIpAddressCount > 16
+```
+
+Key /28 prefix issues:
+- `AvailableIpAddressCount < 16` → subnet exhausted, **cannot allocate /28**, pods won't get IPs
+- `AvailableIpAddressCount >= 16` but still failing → fragmentation (free IPs not contiguous) or AWS internal reservation
+- Each /28 = 16 IPs, supports 16 pods per prefix; each ENI can hold multiple prefixes
+- Fix options: add secondary CIDR to VPC, expand subnet, add new subnet to nodegroup
+- Check `ENABLE_PREFIX_DELEGATION=true` in `aws-node` DaemonSet via `kubectl`
+
+
 
 ```bash
 # List active spot instance requests
@@ -620,6 +746,8 @@ Key CloudFront issues:
 - NLB: check SG rules when targets show unhealthy with no reason
 - Spot: compare price history across AZs side-by-side to identify cheapest AZ
 - Spot: `capacity-not-available` → widen instance type pool, don't just retry same type
+- VPC CNI: always sort subnets by `AvailableIPs` ascending — exhausted ones surface immediately
+- VPC CNI /28: `AvailableIPs >= 16` necessary but not sufficient — fragmentation can still block allocation
 - If command fails with error → quote exact error, suggest fix (wrong region, missing permission, resource not found)
 
 ## Config Management (`/aws config`)
