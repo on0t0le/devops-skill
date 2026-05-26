@@ -16,16 +16,22 @@ Query Elasticsearch/OpenSearch clusters via `curl` — no MCP, no SDKs required.
 - Multiple named instances with persistent config
 - Basic auth and API key auth
 
-**Install:**
+**Install via Claude Code plugin** (recommended):
 
 ```bash
-cp -r elasticsearch ~/.claude/skills/
+claude plugin install https://github.com/abuhrovyi/devops-skill
+```
+
+Or copy manually:
+
+```bash
+cp -r skills/elasticsearch ~/.claude/skills/
 ```
 
 Symlink for live edits:
 
 ```bash
-ln -s $(pwd)/elasticsearch ~/.claude/skills/elasticsearch
+ln -s $(pwd)/skills/elasticsearch ~/.claude/skills/elasticsearch
 ```
 
 **Configure instances** (persisted to `~/.claude/elasticsearch-instances.json`):

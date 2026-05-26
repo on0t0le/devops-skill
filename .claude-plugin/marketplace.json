@@ -1,0 +1,33 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "devops-skill",
+  "owner": {
+    "name": "abuhrovyi"
+  },
+  "metadata": {
+    "description": "DevOps skills for Claude Code — Elasticsearch log querying and more.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "devops-skill",
+      "source": "./",
+      "description": "DevOps skills: Elasticsearch/OpenSearch log querying via curl, multi-instance config, index listing, log search with filters and time ranges.",
+      "version": "1.0.0",
+      "author": {
+        "name": "abuhrovyi"
+      },
+      "license": "MIT",
+      "category": "devops",
+      "keywords": [
+        "elasticsearch",
+        "opensearch",
+        "logs",
+        "devops",
+        "curl",
+        "observability"
+      ],
+      "skills": "./skills/"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "devops-skill",
+  "version": "1.0.0",
+  "description": "DevOps skills for Claude Code — Elasticsearch log querying and more.",
+  "author": {
+    "name": "abuhrovyi"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/abuhrovyi/devops-skill",
+  "skills": "./skills/"
+}
