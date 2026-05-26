@@ -57,6 +57,25 @@ curl -s -H "Authorization: Bearer TOKEN" "http://HOST:PORT/api/v1/ENDPOINT"
 Always pipe through `| jq .` or `| python3 -m json.tool` for readability.  
 All Prometheus API responses: `{"status":"success","data":{...}}` — check `status` first.
 
+## Kubernetes Namespace Label Pitfall
+
+In Kubernetes environments the namespace label name varies by setup:
+
+| Label | When used |
+|---|---|
+| `namespace` | ServiceMonitor/PodMonitor sets it (Prometheus Operator default) |
+| `kubernetes_namespace` | Custom scrape configs, federation, some exporters (e.g. `jmx_k8s`) |
+
+**Always discover before assuming.** When a namespace-filtered query returns empty:
+
+```bash
+# Check which label name is actually used for namespace values
+curl -s [AUTH] "http://HOST:PORT/api/v1/label/kubernetes_namespace/values" | jq '.data[]'
+curl -s [AUTH] "http://HOST:PORT/api/v1/label/namespace/values" | jq '.data[]'
+```
+
+Use whichever returns results. Same query may need `{namespace="X"}` or `{kubernetes_namespace="X"}`.
+
 ## Operations
 
 ### Instant Query (PromQL)
@@ -115,7 +134,7 @@ curl -s [AUTH] "http://HOST:PORT/api/v1/labels" | jq '.data | sort | .[]'
 curl -s [AUTH] "http://HOST:PORT/api/v1/label/LABEL_NAME/values" | jq '.data[]'
 ```
 
-Useful for: `job`, `instance`, `namespace`, `pod`, `service`, `__name__`.
+Useful for: `job`, `instance`, `namespace`, `kubernetes_namespace`, `pod`, `service`, `__name__`.
 
 ### Series Search (find metrics matching selector)
 
@@ -131,18 +150,27 @@ curl -s [AUTH] -G "http://HOST:PORT/api/v1/series" \
 
 ### Targets (scrape status)
 
-```bash
-# All targets
-curl -s [AUTH] "http://HOST:PORT/api/v1/targets" \
-  | jq '.data.activeTargets[] | {job: .labels.job, instance: .labels.instance, health: .health, lastError: .lastError}'
+> **Warning:** `/api/v1/targets` returns full scrape config for every target — in large clusters this is 5–20MB. Prefer PromQL for filtered lookups; use the raw endpoint only for dropped targets or `lastError` which aren't exposed via PromQL.
 
-# Only unhealthy
-curl -s [AUTH] "http://HOST:PORT/api/v1/targets" \
+```bash
+# Preferred: check health via PromQL (fast, filtered)
+curl -s [AUTH] -G "http://HOST:PORT/api/v1/query" \
+  --data-urlencode 'query=count by (job) (up{kubernetes_namespace="X"} == 0)' \
+  | jq '.data.result'
+
+# Raw endpoint: save to file first on large clusters
+curl -s [AUTH] "http://HOST:PORT/api/v1/targets" > /tmp/targets.json
+
+# Only unhealthy (from saved file)
+cat /tmp/targets.json \
   | jq '[.data.activeTargets[] | select(.health != "up")] | .[] | {job: .labels.job, instance: .labels.instance, health: .health, lastError: .lastError}'
 
-# Dropped targets (not being scraped)
-curl -s [AUTH] "http://HOST:PORT/api/v1/targets" \
-  | jq '.data.droppedTargets | length'
+# Filter by namespace (from saved file — try both label variants)
+cat /tmp/targets.json \
+  | jq '[.data.activeTargets[] | select(.labels.namespace == "X" or .labels.kubernetes_namespace == "X")] | .[] | {job: .labels.job, pod: .labels.pod, health: .health, lastError: .lastError}'
+
+# Dropped targets count
+cat /tmp/targets.json | jq '.data.droppedTargets | length'
 ```
 
 ### Health Check Pattern
@@ -232,6 +260,8 @@ Translate user requests into PromQL:
 | "disk usage" | `1 - node_filesystem_avail_bytes / node_filesystem_size_bytes` |
 | "pod restarts" | `increase(kube_pod_container_status_restarts_total[1h])` |
 | "up/down targets" | `up` |
+| "JMX exporters up" | `up{job=~"jmx.*", kubernetes_namespace="X"}` — job name varies: `jmx_k8s`, `jmx`, `jmx-exporter`; discover with `curl .../api/v1/label/job/values` |
+| "which jobs in namespace" | `count by (job) (up{kubernetes_namespace="X"})` |
 
 ## Output Formatting
 
