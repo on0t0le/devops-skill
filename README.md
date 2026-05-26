@@ -10,6 +10,32 @@ claude plugin install https://github.com/on0t0le/devops-skill
 
 ## Skills
 
+### `prometheus/`
+
+Query Prometheus (and VictoriaMetrics, Thanos, Cortex, Mimir) via `curl`. Multiple named instances with persistent config.
+
+**Features:**
+- Instant and range PromQL queries
+- List metrics, labels, label values
+- Targets health (scrape status)
+- Firing alerts and rule status
+- TSDB cardinality stats
+- Multi-instance config (`~/.claude/prometheus-instances.json`)
+
+**Config commands:**
+- `/prometheus config list`
+- `/prometheus config add`
+- `/prometheus config remove <name>`
+- `/prometheus config test [name]`
+
+**Example prompts:**
+- `query prometheus for http error rate in the last hour`
+- `show firing alerts on prod prometheus`
+- `list all metrics starting with kube_pod`
+- `check prometheus targets for unhealthy scrapes`
+
+---
+
 ### `kubernetes-expert/`
 
 Read-only Kubernetes diagnostics expert. Investigates Pod, Namespace, and Workload issues without touching cluster state.
