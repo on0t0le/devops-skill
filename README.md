@@ -6,18 +6,18 @@ Claude Code skills for DevOps workflows.
 
 ### Option 1 — Marketplace (recommended)
 
-Register this repo as a marketplace once, then install by name:
+Inside a Claude Code session:
+
+```
+/plugin marketplace add on0t0le/devops-skill
+/plugin install devops-skill@on0t0le
+```
+
+Via terminal:
 
 ```bash
-claude plugin marketplace add https://github.com/on0t0le/devops-skill
-claude plugin install devops-skill
-```
-
-From within a Claude Code session:
-
-```
-! claude plugin marketplace add https://github.com/on0t0le/devops-skill
-! claude plugin install devops-skill
+claude plugin marketplace add on0t0le/devops-skill
+claude plugin install devops-skill@on0t0le
 ```
 
 ### Option 2 — Direct install (no marketplace registration)
@@ -26,13 +26,11 @@ From within a Claude Code session:
 claude plugin install https://github.com/on0t0le/devops-skill
 ```
 
-From within a Claude Code session:
+Inside a Claude Code session:
 
 ```
 ! claude plugin install https://github.com/on0t0le/devops-skill
 ```
-
-The `!` prefix runs the command in your shell and pipes output back into the conversation.
 
 **Update to latest:**
 
