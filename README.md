@@ -36,6 +36,32 @@ Query Prometheus (and VictoriaMetrics, Thanos, Cortex, Mimir) via `curl`. Multip
 
 ---
 
+### `loki/`
+
+Query Grafana Loki (and Grafana Cloud Logs) via `curl`. Multiple named instances, multi-tenant support.
+
+**Features:**
+- Range and instant LogQL queries
+- List labels and label values
+- List log streams
+- Log rate / count metric queries
+- Multi-tenant (`X-Scope-OrgID`) support
+- Multi-instance config (`~/.claude/loki-instances.json`)
+
+**Config commands:**
+- `/loki config list`
+- `/loki config add`
+- `/loki config remove <name>`
+- `/loki config test [name]`
+
+**Example prompts:**
+- `search loki for errors in app myapp in the last hour`
+- `show loki labels`
+- `query loki for logs from namespace production containing "timeout"`
+- `count error logs per minute in loki prod`
+
+---
+
 ### `kubernetes-expert/`
 
 Read-only Kubernetes diagnostics expert. Investigates Pod, Namespace, and Workload issues without touching cluster state.

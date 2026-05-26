@@ -1,7 +1,7 @@
 {
   "name": "devops-skill",
   "version": "1.0.0",
-  "description": "DevOps skills for Claude Code — Elasticsearch log querying, Prometheus metrics querying, Kubernetes diagnostics, and more.",
+  "description": "DevOps skills for Claude Code — Elasticsearch, Loki log querying, Prometheus metrics, Kubernetes diagnostics, and more.",
   "author": {
     "name": "abuhrovyi"
   },
