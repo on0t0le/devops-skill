@@ -10,7 +10,9 @@ description: >
   Trigger: /aws, "investigate aws", "check ec2", "cloudwatch logs", "cloudtrail",
   "who deleted", "elb health", "ecs task", "rds status", "aws issue", "check alarms",
   "asg", "auto scaling", "scale in", "scale out", "eks", "node group", "eks cluster",
-  "cloudfront", "cdn", "distribution", "cache hit", "origin error", "cloudfront 5xx".
+  "cloudfront", "cdn", "distribution", "cache hit", "origin error", "cloudfront 5xx",
+  "spot", "spot instance", "spot interrupted", "capacity-not-available", "spot price",
+  "spot shortage", "insufficient capacity", "spot fleet", "spot termination".
 trigger: /aws
 ---
 
@@ -353,7 +355,81 @@ aws cloudwatch get-metric-statistics [--profile P] [--region R] \
   --output json | jq '[.Datapoints[] | {Time: .Timestamp, Errors: .Sum}] | sort_by(.Time)'
 ```
 
-### Auto Scaling Groups (ASG)
+### Spot Instances
+
+```bash
+# List active spot instance requests
+aws ec2 describe-spot-instance-requests [--profile P] [--region R] \
+  --query 'SpotInstanceRequests[].{ID:SpotInstanceRequestId, State:State, Status:Status.Code, Message:Status.Message, Type:Type, AZ:LaunchedAvailabilityZone, InstanceID:InstanceId, Price:SpotPrice}' \
+  --output table
+
+# Filter failed/interrupted requests
+aws ec2 describe-spot-instance-requests [--profile P] [--region R] \
+  --filters Name=state,Values=failed,cancelled,closed \
+  --output json | jq '.SpotInstanceRequests[] | {ID: .SpotInstanceRequestId, State: .State, Code: .Status.Code, Message: .Status.Message, AZ: .LaunchedAvailabilityZone, Time: .Status.UpdateTime}'
+
+# Status codes that indicate problems:
+# capacity-not-available      → no capacity in this AZ/instance type
+# price-too-low               → bid below current spot price
+# instance-terminated-by-spot → AWS reclaimed (interruption)
+# instance-stopped-by-spot    → stopped due to interruption
+# constraint-not-fulfillable  → AZ or instance type constraints too narrow
+
+# Spot price history (last 6 hours, compare AZs)
+aws ec2 describe-spot-price-history [--profile P] [--region R] \
+  --instance-types m5.large m5.xlarge \
+  --product-descriptions "Linux/UNIX" \
+  --start-time $(date -u -v-6H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ) \
+  --output json | jq '[.SpotPriceHistory[] | {AZ: .AvailabilityZone, Type: .InstanceType, Price: .SpotPrice, Time: .Timestamp}] | sort_by(.Time) | reverse | .[:20]'
+
+# Spot fleet requests
+aws ec2 describe-spot-fleet-requests [--profile P] [--region R] \
+  --output json | jq '.SpotFleetRequestConfigs[] | {ID: .SpotFleetRequestId, State: .SpotFleetRequestState, Target: .SpotFleetRequestConfig.TargetCapacity, Fulfilled: .SpotFleetRequestConfig.FulfilledCapacity, ExcessCapacity: .SpotFleetRequestConfig.ExcessCapacityTerminationPolicy}'
+
+# Spot fleet instances + their health
+aws ec2 describe-spot-fleet-instances [--profile P] [--region R] \
+  --spot-fleet-request-id sfr-XXXXXXXX \
+  --output json | jq '.ActiveInstances[] | {ID: .InstanceId, Type: .InstanceType, AZ: .InstanceHealth}'
+
+# Spot interruption rebalance recommendations (EC2 signals before interruption)
+aws ec2 describe-instances [--profile P] [--region R] \
+  --filters Name=instance-lifecycle,Values=spot Name=instance-state-name,Values=running \
+  --output json | jq '.Reservations[].Instances[] | {ID: .InstanceId, Type: .InstanceType, AZ: .Placement.AvailabilityZone, RebalanceRecommendation: .SpotInstanceDetails}'
+
+# CloudTrail: spot interruptions and capacity errors
+aws cloudtrail lookup-events [--profile P] [--region R] \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=BidEvictedEvent \
+  --output json | jq '.Events[] | {Time: .EventTime, Resources: .Resources}'
+
+# InsufficientInstanceCapacity in CloudTrail (spot OR on-demand capacity shortage)
+aws cloudtrail lookup-events [--profile P] [--region R] \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=RunInstances \
+  --output json | jq '[.Events[] | select(.CloudTrailEvent | fromjson | .errorCode == "InsufficientInstanceCapacity")] | .[] | {Time: .EventTime, Error: (.CloudTrailEvent | fromjson | .errorMessage)}'
+
+# ASG mixed instances policy (spot + on-demand split)
+aws autoscaling describe-auto-scaling-groups [--profile P] [--region R] \
+  --auto-scaling-group-names ASG_NAME \
+  --output json | jq '.AutoScalingGroups[] | {
+    MixedPolicy: .MixedInstancesPolicy | {
+      OnDemandBase: .InstancesDistribution.OnDemandBaseCapacity,
+      OnDemandPct: .InstancesDistribution.OnDemandPercentageAboveBaseCapacity,
+      SpotAllocation: .InstancesDistribution.SpotAllocationStrategy,
+      SpotMaxPrice: .InstancesDistribution.SpotMaxPrice,
+      InstanceOverrides: [.LaunchTemplate.Overrides[] | .InstanceType]
+    },
+    Instances: [.Instances[] | {ID: .InstanceId, Type: .InstanceType, Market: .Market, AZ: .AvailabilityZone, Health: .HealthStatus}]
+  }'
+```
+
+Key Spot issues:
+- `capacity-not-available` → switch AZ or instance type; check price history across AZs
+- `price-too-low` → bid too low; use `on-demand` or check current spot price
+- `instance-terminated-by-spot` → normal interruption; ensure workload is interruption-tolerant
+- High spot price in all AZs → capacity crunch in region; consider different instance family
+- ASG `SpotAllocationStrategy` — prefer `capacity-optimized` over `lowest-price` for availability
+- `SpotMaxPrice` set → can cause `price-too-low`; remove cap to use on-demand price ceiling
+
+
 
 ```bash
 # List ASGs
@@ -542,6 +618,8 @@ Key CloudFront issues:
 - EKS: highlight non-ACTIVE nodegroups with health.issues details
 - CloudFront: always use `us-east-1` for metrics; note deployment takes 5-15 min
 - NLB: check SG rules when targets show unhealthy with no reason
+- Spot: compare price history across AZs side-by-side to identify cheapest AZ
+- Spot: `capacity-not-available` → widen instance type pool, don't just retry same type
 - If command fails with error → quote exact error, suggest fix (wrong region, missing permission, resource not found)
 
 ## Config Management (`/aws config`)
