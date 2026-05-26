@@ -1,5 +1,6 @@
 ---
 name: loki
+model: haiku
 description: >
   Query Grafana Loki log aggregation using curl. Use whenever the user wants to
   search logs in Loki, fetch log streams, explore labels, run LogQL queries, or

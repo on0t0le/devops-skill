@@ -1,5 +1,6 @@
 ---
 name: elasticsearch
+model: haiku
 description: >
   Query Elasticsearch clusters using curl. Use whenever the user wants to list indexes,
   search logs, inspect documents, check cluster health, or query any Elasticsearch/OpenSearch

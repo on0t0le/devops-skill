@@ -10,6 +10,17 @@ claude plugin install https://github.com/on0t0le/devops-skill
 
 ## Skills
 
+### `investigate/` ⭐
+
+Multi-system incident investigation orchestrator. Spawns parallel Haiku subagents for Kubernetes, Prometheus, Loki, and Elasticsearch — synthesizes a unified root cause report.
+
+**Example prompts:**
+- `/investigate errors in myapp since 15:00`
+- `investigate why service payments is slow`
+- `something is wrong with the orders pod in production`
+
+---
+
 ### `prometheus/`
 
 Query Prometheus (and VictoriaMetrics, Thanos, Cortex, Mimir) via `curl`. Multiple named instances with persistent config.

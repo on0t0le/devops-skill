@@ -1,5 +1,6 @@
 ---
 name: prometheus
+model: haiku
 description: >
   Query Prometheus instances using curl. Use whenever the user wants to query metrics,
   check alerts, inspect targets, explore label values, run PromQL expressions, or

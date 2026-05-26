@@ -1,5 +1,6 @@
 ---
 name: kubernetes-expert
+model: haiku
 description: >
   Read-only Kubernetes diagnostics expert. Use when user asks to debug a Pod,
   investigate CrashLoopBackOff, OOMKilled, Pending, ImagePullBackOff, Evicted,
