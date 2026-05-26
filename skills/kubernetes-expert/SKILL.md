@@ -3,12 +3,13 @@ name: kubernetes-expert
 description: >
   Read-only Kubernetes diagnostics expert. Use when user asks to debug a Pod,
   investigate CrashLoopBackOff, OOMKilled, Pending, ImagePullBackOff, Evicted,
-  or any pod/workload not behaving correctly. Also use for namespace-level
-  investigation, Deployment/StatefulSet/DaemonSet/Job issues, resource pressure,
-  or "why is X not starting". Never modifies cluster state.
+  ContainerStatusUnknown, unexpected Completed pods in Deployments, or any
+  pod/workload not behaving correctly. Also use for namespace-level investigation,
+  Deployment/StatefulSet/DaemonSet/Job issues, resource pressure, or "why is X not
+  starting". Never modifies cluster state.
   Trigger: "debug pod", "why is pod failing", "pod crashlooping", "pod pending",
   "check namespace", "investigate deployment", "pod OOMKilled", "kubernetes expert",
-  "k8s issue", "why is my pod".
+  "k8s issue", "why is my pod", "ContainerStatusUnknown", "pod completed but shouldn't".
 allowed-tools: Bash, Read, Grep
 ---
 
@@ -60,10 +61,27 @@ kubectl get pod <NAME> -n <NS> -o json | jq '{
 ```
 
 Key fields to examine:
-- `state.waiting.reason` — CrashLoopBackOff, ImagePullBackOff, OOMKilled, etc.
-- `state.terminated.exitCode` — 137=OOM, 1=app error, 126/127=command not found
+- `state.waiting.reason` — CrashLoopBackOff, ImagePullBackOff, OOMKilled, ContainerStatusUnknown, etc.
+- `state.terminated.exitCode` — 137=OOM, 1=app error, 126/127=command not found, 0=clean exit
+- `state.terminated.reason` — `Completed` (exit 0) vs `Error` vs `OOMKilled`
 - `restartCount` — high count → repeated crash
 - `lastState.terminated` — previous crash reason/exit code
+
+**ContainerStatusUnknown** — container runtime lost contact with container. Check:
+```bash
+kubectl get pod <NAME> -n <NS> -o json | jq '.status.containerStatuses[] | select(.state.waiting.reason == "ContainerStatusUnknown" or .lastState.terminated.reason == "ContainerStatusUnknown")'
+kubectl describe node <NODE> | grep -A10 "Conditions:"  # look for NotReady, MemoryPressure, DiskPressure
+kubectl get events -n <NS> --field-selector=type=Warning | grep -i "unknown\|node\|runtime"
+```
+Causes: node went NotReady while pod was running, kubelet restart, container runtime crash, node OOM.
+
+**Completed in a Deployment (unexpected)** — pod exited 0 but Deployment expects it to run forever:
+```bash
+kubectl get pod <NAME> -n <NS> -o json | jq '{exitCode: .status.containerStatuses[].state.terminated.exitCode, reason: .status.containerStatuses[].state.terminated.reason, finishedAt: .status.containerStatuses[].state.terminated.finishedAt}'
+kubectl logs <NAME> -n <NS> --tail=50   # last log lines before exit
+kubectl get deployment <WORKLOAD> -n <NS> -o json | jq '.spec.template.spec.containers[] | {command: .command, args: .args}'
+```
+Causes: entrypoint/command exits immediately (wrong CMD), one-shot script run as Deployment, missing `while true` loop wrapper.
 
 ### 3. Describe (Events + Conditions)
 
@@ -173,6 +191,8 @@ kubectl get deploy,sts,ds,jobs -n <NS>
 | `Evicted` | `describe`, node pressure | Node OOM/disk pressure |
 | `Terminating` stuck | `describe` finalizers | Finalizer not clearing |
 | High restarts, no crash | logs (current) | Liveness probe too aggressive |
+| `ContainerStatusUnknown` | node conditions, runtime events | Node went NotReady, kubelet/runtime crash |
+| `Completed` in Deployment | logs, container command | CMD exits 0 — wrong entrypoint or one-shot script |
 
 ## Output Format
 
