@@ -145,6 +145,28 @@ curl -s [AUTH] "http://HOST:PORT/api/v1/targets" \
   | jq '.data.droppedTargets | length'
 ```
 
+### Health Check Pattern
+
+For "are all X up?", "is X down?", or "check if exporters are running" — **use targets API first**, not PromQL `up{}`.
+
+Targets API returns `lastError` and richer metadata in one call. PromQL `up{}` is for trends and alerting rules.
+
+```bash
+# Check all targets matching a job name
+curl -s [AUTH] "http://HOST:PORT/api/v1/targets" \
+  | jq '[.data.activeTargets[] | select(.labels.job | test("JOB_PATTERN"))] | {total: length, down: [.[] | select(.health != "up")] | length, unhealthy: [.[] | select(.health != "up")] | map({instance: .labels.instance, pod: .labels.instance, error: .lastError})}'
+```
+
+**Namespace label gap**: Many jobs (JMX exporters, custom scrapers) do not populate `namespace` as a metric label even when pods live in a namespace. If `{namespace="..."}` filter returns empty:
+
+1. Drop the namespace filter — query by job name pattern instead
+2. Use targets API and filter by `instance` or pod name substring:
+
+```bash
+curl -s [AUTH] "http://HOST:PORT/api/v1/targets" \
+  | jq '[.data.activeTargets[] | select(.labels.instance | test("NAMESPACE_OR_APP_PATTERN"))] | .[] | {job: .labels.job, instance: .labels.instance, health: .health, lastError: .lastError}'
+```
+
 ### Alerts
 
 ```bash
@@ -258,7 +280,7 @@ Multiple, none default → list and ask.
 |---|---|---|
 | `connection refused` | Wrong host/port or Prometheus down | Check URL |
 | `bad_data` in response | Invalid PromQL syntax | Check expression |
-| `"result":[]` | Metric not found or wrong labels | List metrics, check label values |
+| `"result":[]` | Metric not found, wrong labels, or job doesn't populate `namespace` label | List metrics; if namespace filter used, retry without it and use targets API instead |
 | `execution: query processing would load too many samples` | Query too broad + long range | Narrow time range or add label filters |
 | 401 / 403 | Auth missing or wrong | Check auth config |
 | `invalid parameter "query"` | Missing URL encoding | Use `--data-urlencode` |
