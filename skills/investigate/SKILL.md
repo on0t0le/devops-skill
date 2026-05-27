@@ -66,7 +66,11 @@ Only spawn agents for configured systems (or URL/profile provided in message). S
 ## Step 3: Phase 1 — Broad Parallel Sweep
 
 Spawn ALL relevant subagents in a **single message** (one Agent tool call per system).
-Each subagent uses `model: haiku` to minimize token cost.
+
+⚠️ **Agent tool call requirements — non-negotiable:**
+- Set `model: "haiku"` on every Agent call. Without this the wrong model runs and token costs spike.
+- Set `subagent_type: "general-purpose"` on every Agent call.
+- Do NOT omit either field.
 
 **IMPORTANT:** Each Phase 1 agent must append a `## Cross-Validation Requests` section to its output listing specific questions it needs other systems to answer. Examples:
 - "K8s → AWS: Node ip-10-0-1-42 NotReady since 14:32 — confirm EC2 instance health and whether it was spot-terminated"
@@ -76,13 +80,15 @@ Each subagent uses `model: haiku` to minimize token cost.
 
 **Kubernetes subagent prompt template:**
 ```
-You are a Kubernetes diagnostics expert. Use the kubernetes-investigator skill.
+FIRST ACTION — before anything else, invoke the Skill tool:
+  skill: "devops-skill:kubernetes-investigator"
+Do NOT run kubectl, bash, or any other tool until the skill has loaded.
 
 Task: Investigate [SERVICE/POD] in namespace [NAMESPACE].
 Focus: [SYMPTOM — pod restarts, OOM, Pending, etc.]
 Time context: [TIME RANGE]
 
-Run read-only kubectl diagnostics. Report:
+Run read-only kubectl diagnostics per the skill. Report:
 1. Pod status and recent events
 2. Container states and restart count
 3. Relevant log lines (last 50)
@@ -103,7 +109,9 @@ Be concise. Return structured findings only.
 
 **Prometheus subagent prompt template:**
 ```
-You are a Prometheus metrics expert. Use the prometheus skill.
+FIRST ACTION — before anything else, invoke the Skill tool:
+  skill: "devops-skill:prometheus"
+Do NOT run curl, bash, or any other tool until the skill has loaded.
 
 Task: Query metrics for service [SERVICE] in the last [TIME RANGE].
 Prometheus instance: [NAME or URL]
@@ -128,7 +136,9 @@ Examples:
 
 **Loki subagent prompt template:**
 ```
-You are a Loki log search expert. Use the loki skill.
+FIRST ACTION — before anything else, invoke the Skill tool:
+  skill: "devops-skill:loki"
+Do NOT run curl, bash, or any other tool until the skill has loaded.
 
 Task: Search logs for service [SERVICE] in the last [TIME RANGE].
 Loki instance: [NAME or URL]
@@ -151,7 +161,9 @@ Examples:
 
 **AWS subagent prompt template:**
 ```
-You are an AWS infrastructure investigator. Use the aws-investigator skill.
+FIRST ACTION — before anything else, invoke the Skill tool:
+  skill: "devops-skill:aws-investigator"
+Do NOT run aws CLI, bash, or any other tool until the skill has loaded.
 
 Task: Investigate [SERVICE] issue in AWS [PROFILE/REGION].
 Focus: [SYMPTOM — EC2 down, ECS task failing, ALB unhealthy targets, alarms firing,
@@ -191,7 +203,9 @@ Examples:
 
 **Elasticsearch subagent prompt template:**
 ```
-You are an Elasticsearch log search expert. Use the elasticsearch skill.
+FIRST ACTION — before anything else, invoke the Skill tool:
+  skill: "devops-skill:elasticsearch"
+Do NOT run curl, bash, or any other tool until the skill has loaded.
 
 Task: Search logs for [SERVICE] in the last [TIME RANGE].
 ES instance: [NAME or URL]
@@ -227,7 +241,12 @@ Each follow-up agent receives:
 
 **Phase 2 subagent prompt template:**
 ```
-You are a [TARGET SYSTEM] expert. Use the [TARGET SKILL] skill.
+FIRST ACTION — before anything else, invoke the Skill tool:
+  skill: "devops-skill:[TARGET SKILL NAME]"
+  (kubernetes-investigator | aws-investigator | prometheus | elasticsearch | loki)
+Do NOT run any tool until the skill has loaded.
+
+You are a [TARGET SYSTEM] expert.
 
 ## Context from Phase 1 Investigation
 
