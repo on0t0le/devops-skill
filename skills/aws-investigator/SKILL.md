@@ -18,11 +18,70 @@ description: >
   "replication lag", "replica lag", "rds lag", "replication slot", "inactive slot",
   "storage full", "rds storage", "wal accumulation".
 trigger: /aws
+allowed-tools:
+  - Read
+  - Bash(aws sts get-caller-identity*)
+  - Bash(aws configure list*)
+  - Bash(aws ec2 describe-*)
+  - Bash(aws cloudwatch describe-*)
+  - Bash(aws cloudwatch get-*)
+  - Bash(aws cloudwatch list-*)
+  - Bash(aws logs describe-*)
+  - Bash(aws logs filter-log-events*)
+  - Bash(aws logs start-query*)
+  - Bash(aws logs get-query-results*)
+  - Bash(aws elbv2 describe-*)
+  - Bash(aws elb describe-*)
+  - Bash(aws ecs describe-*)
+  - Bash(aws ecs list-*)
+  - Bash(aws rds describe-*)
+  - Bash(aws eks describe-*)
+  - Bash(aws eks list-*)
+  - Bash(aws apigateway get-*)
+  - Bash(aws cloudtrail lookup-events*)
+  - Bash(aws autoscaling describe-*)
+  - Bash(aws lambda get-*)
+  - Bash(aws lambda list-*)
+  - Bash(aws cloudfront list-*)
+  - Bash(aws cloudfront get-*)
+  - Bash(aws s3api list-*)
+  - Bash(aws s3api get-*)
+  - Bash(aws iam list-*)
+  - Bash(aws iam get-*)
+  - Bash(aws sqs list-*)
+  - Bash(aws sqs get-*)
+  - Bash(aws sns list-*)
+  - Bash(aws kinesis list-*)
+  - Bash(aws kinesis describe-*)
+  - Bash(aws dynamodb describe-*)
+  - Bash(aws dynamodb list-*)
+  - Bash(aws ssm describe-*)
+  - Bash(aws ssm list-*)
+  - Bash(aws ssm get-*)
+  - Bash(rtk proxy aws*)
+  - Bash(python3 -c*)
+  - Bash(date*)
+  - Bash(sleep*)
 ---
 
 # AWS Investigator
 
 Read-only AWS diagnostics via AWS CLI. **Never** modify resources.
+
+## ⚠️ Main Thread: Delegate to Subagent
+
+This skill has `model: haiku` — it's designed to run as a **compressed subagent**, not inline in the main Claude thread. Running AWS CLI commands inline floods the main context with raw output (CloudWatch JSON, log streams, etc.), burning tokens fast and making the conversation unwieldy.
+
+**If you are the main Claude thread and just triggered this skill for an investigation:**
+
+→ Use the `investigate` skill instead. It spawns this skill as a haiku subagent and returns compressed findings to the main thread, preserving your context window.
+
+**When to run inline (exceptions):**
+- User asked a single specific lookup (e.g. "what's the status of instance i-1234abcd")
+- User explicitly used `/aws` and wants a quick spot-check, not a full investigation
+- Already inside a subagent context (you were spawned to do AWS work)
+
+**For incident investigation** ("received alert", "5XX errors", "service down", "investigate KastaPay") — always delegate to `investigate` which will spawn me properly.
 
 ## Hard Rules
 

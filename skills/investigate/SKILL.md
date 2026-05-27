@@ -2,13 +2,22 @@
 name: investigate
 description: >
   Multi-system DevOps incident investigation orchestrator. Spawns parallel Haiku
-  subagents for Elasticsearch, Loki, Prometheus, and Kubernetes — then synthesizes
-  a unified root cause report. Use when the user reports an incident, service
-  degradation, or asks to investigate an issue across multiple systems.
+  subagents for Elasticsearch, Loki, Prometheus, Kubernetes, and AWS — then synthesizes
+  a unified root cause report. ALWAYS use when the user reports an incident, alert,
+  alarm, service degradation, or asks to investigate an issue in any service or
+  infrastructure. This skill handles AWS-only incidents just as well as multi-system ones
+  — if only AWS is configured, it spawns just the AWS subagent.
   Trigger: /investigate, "investigate issue", "something is wrong with X",
   "service is down", "investigate incident", "full investigation", "check everything",
-  "what's causing errors in Y", "why is service X slow/failing".
+  "what's causing errors in Y", "why is service X slow/failing",
+  "received alert", "alert firing", "alarm triggered", "CloudWatch alarm",
+  "5XX alert", "ApiGateway5XXError", "production alert", "monitoring alert",
+  "investigate the issue in", "investigate in", "got an alert", "alert at",
+  "received an alert", "pagerduty", "grafana alert", "opsgenie".
 trigger: /investigate
+allowed-tools:
+  - Agent
+  - Read
 ---
 
 # DevOps Investigation Orchestrator
@@ -36,7 +45,7 @@ Select based on context. When in doubt, query all configured systems.
 | **Prometheus** | Metrics: error rate, latency, saturation, alerts firing |
 | **Loki** | Structured log search, Kubernetes-native logs via label selectors |
 | **Elasticsearch** | App logs if ES instances are configured |
-| **AWS** | EC2 health, ECS task failures, ELB target health, CloudWatch alarms, CloudTrail events |
+| **AWS** | EC2 health, ECS/EKS task failures, API Gateway 5XX, ELB target health, CloudWatch alarms, CloudTrail events, RDS issues |
 
 Check which instances are configured:
 - `~/.claude/prometheus-instances.json`
@@ -45,6 +54,14 @@ Check which instances are configured:
 - `~/.claude/aws-instances.json`
 
 Only spawn agents for configured systems (or URL/profile provided in message). Skip unconfigured ones silently — mention in final report if relevant.
+
+**AWS-only mode**: If the incident is clearly AWS-based (API Gateway alert, CloudWatch alarm, ECS/EKS issue, RDS error, ALB health) AND no Loki/Prometheus/ES instances are configured, skip checking those config files and spawn just the AWS subagent immediately. AWS credentials from the current shell session count as "configured" — check with `aws sts get-caller-identity`. Don't block the investigation waiting for systems that aren't relevant.
+
+**Symptom-to-system hints:**
+- "ApiGateway5XXError", "5XX alert", API Gateway alarm → AWS subagent (API GW metrics + logs)
+- "pod crashlooping", "OOMKilled", "deployment failed" → Kubernetes subagent
+- "high latency", "error rate spike" → Prometheus + relevant app system
+- "received alert from" + service name → check AWS first, then K8s if EKS involved
 
 ## Step 3: Phase 1 — Broad Parallel Sweep
 
@@ -137,17 +154,29 @@ Examples:
 You are an AWS infrastructure investigator. Use the aws-investigator skill.
 
 Task: Investigate [SERVICE] issue in AWS [PROFILE/REGION].
-Focus: [SYMPTOM — EC2 down, ECS task failing, ALB unhealthy targets, alarms firing, etc.]
+Focus: [SYMPTOM — EC2 down, ECS task failing, ALB unhealthy targets, alarms firing,
+        API Gateway 5XX errors, EKS node issues, RDS errors, etc.]
 Time context: [TIME RANGE]
+
+IMPORTANT: Use the correct UTC timestamps for all CloudWatch/Logs queries.
+The user's local time is [LOCAL TIME + TIMEZONE]. Convert to UTC before querying:
+- CloudWatch metric queries: use ISO 8601 UTC strings ("2026-05-27T00:00:00Z")
+- CloudWatch Logs Insights: use `date -u` or Python to compute Unix timestamps in UTC
+  → python3 -c "import datetime; print(int(datetime.datetime(YYYY,MM,DD,HH,MM, tzinfo=datetime.timezone.utc).timestamp()))"
+  Do NOT use macOS `date -j` with a Z-suffix input — it ignores the Z and uses local time.
 
 Run these checks and report findings:
 1. Any ALARM-state CloudWatch alarms related to [SERVICE]
-2. ECS service status if applicable (desired vs running count, recent events)
-3. ELB target health if applicable (unhealthy targets + reason)
-4. CloudTrail: recent changes to [SERVICE] resources in [TIME RANGE]
-5. CloudWatch Logs: errors in relevant log group in [TIME RANGE]
+2. API Gateway 5XX metrics if applicable — check both `5XXError` metric and execution logs
+   - List REST APIs: `aws apigateway get-rest-apis`
+   - Get 5XX metric per API by ApiName dimension
+   - If execution logs enabled: query with correct UTC timestamps for status 5XX entries
+3. ECS/EKS service status if applicable (desired vs running count, recent events)
+4. NLB/ALB target health if applicable (unhealthy targets + reason)
+5. CloudTrail: recent changes to [SERVICE] resources in [TIME RANGE]
+6. RDS events/errors if database is involved
 
-Return: resource state, anomalies, timeline of changes, suspected cause.
+Return: resource state, anomalies, timeline of changes, root cause hypothesis.
 
 ## Cross-Validation Requests
 End your report with this section listing specific questions for other systems.
@@ -157,6 +186,7 @@ Examples:
 - CloudTrail config change at time T → ask Loki/ES for errors starting at T
 - Spot termination at time T → ask K8s for node evictions at T
 - ASG scale-in event → ask Prometheus if traffic/load changed before it
+- API GW 504 on health endpoint → ask K8s if pods were restarting at that time
 ```
 
 **Elasticsearch subagent prompt template:**
