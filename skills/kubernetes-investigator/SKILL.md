@@ -11,26 +11,46 @@ description: >
   Trigger: "debug pod", "why is pod failing", "pod crashlooping", "pod pending",
   "check namespace", "investigate deployment", "pod OOMKilled", "kubernetes investigator",
   "k8s issue", "why is my pod", "ContainerStatusUnknown", "pod completed but shouldn't".
-allowed-tools: Bash, Read, Grep
+allowed-tools:
+  - Bash
+  - Read
+  - Grep
+  - Skill
 ---
 
 # Kubernetes Investigator
+
+## Skill Loading
+
+**FIRST ACTION** — invoke the Skill tool before anything else:
+```
+skill: "devops-skill:kubernetes-investigator"   ← already loaded (this file)
+```
+
+**SECOND ACTION** — immediately after, invoke:
+```
+skill: "devops-skill:kubernetes-troubleshooting-flow"
+```
+
+Do NOT run kubectl or any other tool until both skills are loaded.
+The troubleshooting-flow skill provides PromQL/LogQL/AWS correlation templates
+used in the Correlation Phase below.
 
 ## Context Resolution
 
 Resolve kubectl context in this order:
 
-1. **Context in message** — user says "use context prod-cluster", "in context staging" → `--context=NAME`
-2. **Kubeconfig profile/context** — user says "use kubeconfig X" → `--kubeconfig=PATH`
-3. **Current context** (default) — use whatever `kubectl config current-context` returns
+1. **Context in message** — user says "use context prod-cluster" → `--context=NAME`
+2. **Kubeconfig profile** — user says "use kubeconfig X" → `--kubeconfig=PATH`
+3. **Current context** (default) — use `kubectl config current-context`
 
-Always show active context at start of investigation:
+Always show active context at start:
 ```bash
 kubectl config current-context
 kubectl config get-contexts --no-headers | grep '^\*'
 ```
 
-If user didn't specify a context and multiple contexts exist, show the active one and proceed — don't ask unless the investigation returns unexpected results suggesting wrong cluster.
+If user didn't specify context and multiple exist, show active one and proceed.
 
 Read-only diagnostics. **Never** modify cluster state.
 
@@ -40,26 +60,35 @@ Read-only diagnostics. **Never** modify cluster state.
 - `kubectl delete`, `kubectl apply`, `kubectl patch`, `kubectl edit`
 - `kubectl exec`, `kubectl cp`, `kubectl port-forward`
 - `kubectl cordon`, `kubectl drain`, `kubectl taint`
-- `curl -X`, `curl -d`, `curl --request`, `curl --data` (any mutating HTTP)
+- `curl -X`, `curl -d`, `curl --request`, `curl --data` (mutating HTTP)
 - `rm`, `mv`, `kill`, any write to cluster or filesystem
 
 If unsure whether a command is read-only — skip it.
 
 ## Diagnostic Workflow
 
-Work top-down. Stop and report as soon as root cause found — don't run all steps blindly. Run steps 1 and 2 in parallel when pod name and namespace are both known.
+Work top-down. Stop as soon as root cause found — don't run all steps blindly.
 
 ### 1. Identify Target
 
 ```bash
-# User gave pod name — find namespace if not given
+# User gave pod name — find namespace if missing
 kubectl get pod <NAME> -A
 kubectl get pod <NAME> -n <NAMESPACE> -o wide
 
-# User gave namespace — list problem pods
-kubectl get pods -n <NAMESPACE> --field-selector='status.phase!=Running' 2>/dev/null
+# User gave service/app name — find relevant pods
+kubectl get pods -A -l app=<SERVICE> 2>/dev/null
+kubectl get pods -n <NAMESPACE> -l app=<SERVICE> 2>/dev/null
+
+# User gave namespace only — triage all problem pods first
 kubectl get pods -n <NAMESPACE> | grep -v 'Running\|Completed'
+kubectl get pods -n <NAMESPACE> --field-selector='status.phase!=Running' 2>/dev/null
+kubectl get events -n <NAMESPACE> --sort-by='.lastTimestamp' --field-selector=type=Warning | tail -20
 ```
+
+**Alert context mode** — when invoked from an incident alert (e.g. "ApiGateway5XXError",
+"service down", "OOMKilled alert"), start with namespace-wide triage before drilling
+into specific pods. Identify the worst offenders first.
 
 ### 2. Pod Status Snapshot
 
@@ -77,44 +106,30 @@ kubectl get pod <NAME> -n <NS> -o json | jq '{
 }'
 ```
 
-Key fields to examine:
-- `state.waiting.reason` — CrashLoopBackOff, ImagePullBackOff, OOMKilled, ContainerStatusUnknown, etc.
+Key fields:
+- `state.waiting.reason` — CrashLoopBackOff, ImagePullBackOff, OOMKilled, ContainerStatusUnknown
 - `state.terminated.exitCode` — 137=OOM, 1=app error, 126/127=command not found, 0=clean exit
-- `state.terminated.reason` — `Completed` (exit 0) vs `Error` vs `OOMKilled`
-- `restartCount` — high count → repeated crash
+- `state.terminated.reason` — `Completed` vs `Error` vs `OOMKilled`
+- `restartCount` — high → repeated crash
 - `lastState.terminated` — previous crash reason/exit code
 
-**ContainerStatusUnknown** — container runtime lost contact with container. Check:
+**ContainerStatusUnknown** — runtime lost contact with container. Check:
 ```bash
 kubectl get pod <NAME> -n <NS> -o json | jq '.status.containerStatuses[] | select(.state.waiting.reason == "ContainerStatusUnknown" or .lastState.terminated.reason == "ContainerStatusUnknown")'
-kubectl describe node <NODE> | grep -A10 "Conditions:"  # look for NotReady, MemoryPressure, DiskPressure
+kubectl describe node <NODE> | grep -A10 "Conditions:"
 kubectl get events -n <NS> --field-selector=type=Warning | grep -i "unknown\|node\|runtime"
 ```
-Causes: node went NotReady while pod was running, kubelet restart, container runtime crash, node OOM.
+Causes: node went NotReady while pod ran, kubelet restart, container runtime crash, node OOM.
 
-**Completed in a Deployment (unexpected)** — pod exited 0 but Deployment expects it to run forever:
+**Completed in Deployment** — pod exited 0 but Deployment expects forever:
 ```bash
 kubectl get pod <NAME> -n <NS> -o json | jq '{exitCode: .status.containerStatuses[].state.terminated.exitCode, reason: .status.containerStatuses[].state.terminated.reason, finishedAt: .status.containerStatuses[].state.terminated.finishedAt}'
-kubectl logs <NAME> -n <NS> --tail=50   # last log lines before exit
+kubectl logs <NAME> -n <NS> --tail=50
 kubectl get deployment <WORKLOAD> -n <NS> -o json | jq '.spec.template.spec.containers[] | {command: .command, args: .args}'
-```
-
-Check ephemeral storage limit — pod evicted for exceeding it can appear as Completed:
-```bash
-# Check if ephemeral-storage limit is set
-kubectl get pod <NAME> -n <NS> -o json | jq '.spec.containers[] | {name: .name, ephemeral: .resources.limits["ephemeral-storage"]}'
-
-# Check events for ephemeral eviction
-kubectl get events -n <NS> --field-selector=involvedObject.name=<NAME> | grep -i "ephemeral\|evict\|disk"
-
-# Check pod status message (eviction reason is here)
+# Check ephemeral storage eviction
 kubectl get pod <NAME> -n <NS> -o json | jq '{message: .status.message, reason: .status.reason}'
-
-# Node ephemeral storage pressure
-kubectl describe node <NODE> | grep -A3 "DiskPressure\|ephemeral"
+kubectl get pod <NAME> -n <NS> -o json | jq '.spec.containers[] | {name: .name, ephemeral: .resources.limits["ephemeral-storage"]}'
 ```
-
-Causes: entrypoint/command exits immediately (wrong CMD), one-shot script run as Deployment, missing `while true` loop wrapper, **ephemeral storage limit exceeded** (kubelet evicts pod — check `status.message` for "ephemeral-storage" and `status.reason: Evicted").
 
 ### 3. Describe (Events + Conditions)
 
@@ -123,114 +138,107 @@ kubectl describe pod <NAME> -n <NS>
 ```
 
 Focus on:
-- **Events** section (bottom) — scheduling failures, image pull errors, OOM kills
+- **Events** (bottom) — scheduling failures, image pull errors, OOM kills
 - **Conditions** — PodScheduled=False → node issue; ContainersReady=False → container issue
 - **Requests/Limits** — missing limits or too-low memory
 
 ### 4. Logs
 
 ```bash
-# Current logs (last 100 lines)
 kubectl logs <NAME> -n <NS> --tail=100
-
-# Previous container (if restarting)
 kubectl logs <NAME> -n <NS> --previous --tail=100
-
-# Specific container in multi-container pod
 kubectl logs <NAME> -n <NS> -c <CONTAINER> --tail=100
 kubectl logs <NAME> -n <NS> -c <CONTAINER> --previous --tail=100
-
-# Init container logs
 kubectl logs <NAME> -n <NS> -c <INIT_CONTAINER_NAME> --tail=100
 ```
 
-### 5. Workload Context (Deployment/StatefulSet/DaemonSet)
+### 5. Workload Context
 
 ```bash
-# Find owning workload
 kubectl get pod <NAME> -n <NS> -o jsonpath='{.metadata.ownerReferences}' | jq .
-
-# Check workload status
 kubectl get deployment <WORKLOAD> -n <NS> -o wide
 kubectl describe deployment <WORKLOAD> -n <NS>
-
-# ReplicaSet events
 kubectl get rs -n <NS> | grep <WORKLOAD>
-kubectl describe rs <RS_NAME> -n <NS>
-
-# Rollout history
 kubectl rollout history deployment/<WORKLOAD> -n <NS>
 ```
 
-### 5b. Pending Pod — Node Label Cross-Check
-
-When pod is Pending due to `didn't match Pod's node affinity/selector`:
+### 5b. Pending — Node Label Cross-Check
 
 ```bash
-# What labels does the pod require?
 kubectl get pod <NAME> -n <NS> -o json | jq '{
   nodeSelector: .spec.nodeSelector,
   nodeAffinity: .spec.affinity.nodeAffinity,
   tolerations: .spec.tolerations
 }'
-
-# What labels actually exist on nodes?
 kubectl get nodes -o json | jq '.items[] | {name: .metadata.name, labels: .metadata.labels, taints: .spec.taints}'
-
-# Quick: does any node have the required label?
 kubectl get nodes -l <KEY>=<VALUE>
 ```
-
-If zero nodes match the required label → node group doesn't exist or was never created. Cross-check AWS EKS node group labels and status.
 
 ### 6. Node & Resource Pressure
 
 ```bash
-# What node is pod on (or why not scheduled)
 kubectl get pod <NAME> -n <NS> -o wide
-
-# Node conditions
 kubectl describe node <NODE_NAME> | grep -A5 "Conditions:"
-
-# Node resource usage
 kubectl top node <NODE_NAME> 2>/dev/null
-
-# Pod resource usage
 kubectl top pod <NAME> -n <NS> 2>/dev/null
-
-# Namespace resource quotas
 kubectl describe quota -n <NS> 2>/dev/null
 kubectl describe limitrange -n <NS> 2>/dev/null
 ```
 
-### 7. Config & Secrets (existence check only)
+**When node issues found** — extract EC2 instance ID for AWS cross-validation:
+```bash
+kubectl get node <NODE_NAME> -o json | jq '{
+  InternalIP: (.status.addresses[] | select(.type=="InternalIP") | .address),
+  InstanceID: (.spec.providerID | split("/") | last)
+}'
+```
+
+### 7. Config & Secrets
 
 ```bash
-# Referenced ConfigMaps exist?
 kubectl get configmap <NAME> -n <NS> 2>/dev/null
-
-# Referenced Secrets exist?
 kubectl get secret <NAME> -n <NS> 2>/dev/null
-
-# ServiceAccount exists?
 kubectl get serviceaccount <SA> -n <NS> 2>/dev/null
 ```
 
 ### 8. Namespace-Wide Investigation
 
 ```bash
-# All non-running pods
 kubectl get pods -n <NS> -o wide | grep -v 'Running\|Completed'
-
-# Recent namespace events (sorted)
 kubectl get events -n <NS> --sort-by='.lastTimestamp' | tail -30
-
-# Warning events only
 kubectl get events -n <NS> --field-selector=type=Warning --sort-by='.lastTimestamp'
-
-# All workload health
 kubectl get deploy,sts,ds,jobs -n <NS>
 ```
+
+## Evidence Gate
+
+Before writing the Root Cause section, verify you have at least 2 of these:
+- Specific kubectl output line with the failure signal (state, reason, exit code)
+- Log line with timestamp showing the error
+- Event entry (type=Warning with relevant reason)
+- Metric or resource value (restartCount, limit, available IPs)
+
+If fewer than 2 evidence items exist → do not guess root cause. Use the Escalation section.
+
+## Correlation Phase
+
+After identifying root cause from kubectl, generate cross-validation requests using
+the templates from `kubernetes-troubleshooting-flow` skill.
+
+Select templates matching what kubectl found:
+- **OOMKilled** → Prometheus memory template + check if node-level OOM → AWS node template
+- **CrashLoopBackOff** → Loki error log template + Prometheus restart rate template
+- **Node NotReady / ContainerStatusUnknown** → AWS node health template (required — always)
+- **Pending (no capacity)** → AWS nodegroup/ASG/subnet template
+- **Pending (affinity/taint)** → no cross-validation needed (kubectl is authoritative)
+- **ImagePullBackOff from ECR** → AWS ECR/IAM template
+- **Service 5XX errors** → Prometheus error rate template + Loki error log template
+- **Evicted (ephemeral storage)** → no external cross-validation needed
+
+Fill ALL placeholders with actual values from kubectl output:
+pod name, namespace, timestamp, node name, instance ID, memory limit, restart count, etc.
+
+Empty or partially-filled templates are not useful — only include what you can fill.
 
 ## Common Failure Patterns
 
@@ -238,20 +246,17 @@ kubectl get deploy,sts,ds,jobs -n <NS>
 |---|---|---|
 | `CrashLoopBackOff` | `logs --previous` | App error, missing config, OOM |
 | `OOMKilled` (exit 137) | `describe` limits, `top pod` | Memory limit too low or leak |
-| `Pending` (no node) | `describe` Events, node labels | Insufficient CPU/mem, no matching node, taints, missing node label |
-| `ImagePullBackOff` | `describe` Events | Wrong image tag, missing imagePullSecret |
+| `Pending` (no node) | `describe` Events, node labels | No matching node, taints, VPC CNI IP exhaustion |
+| `ImagePullBackOff` | `describe` Events | Wrong image tag, missing imagePullSecret, ECR IAM |
 | `Init:CrashLoopBackOff` | init container logs | Init script failing, dependency not ready |
 | `CreateContainerConfigError` | `describe` Events | Missing ConfigMap or Secret |
-| `Evicted` | `describe`, node pressure | Node OOM/disk pressure |
+| `Evicted` | `describe`, node pressure | Node OOM/disk or ephemeral storage limit |
 | `Terminating` stuck | `describe` finalizers | Finalizer not clearing |
 | High restarts, no crash | logs (current) | Liveness probe too aggressive |
 | `ContainerStatusUnknown` | node conditions, runtime events | Node went NotReady, kubelet/runtime crash |
-| `Completed` in Deployment | logs, container command | CMD exits 0 — wrong entrypoint, one-shot script, or ephemeral storage eviction |
-| `Evicted` / ephemeral limit | `status.message`, pod events | Pod exceeded `ephemeral-storage` limit — kubelet terminated it |
+| `Completed` in Deployment | logs, container command | CMD exits 0 — wrong entrypoint or ephemeral storage eviction |
 
 ## Output Format
-
-Structure findings as:
 
 ```
 ## Pod: <name> / Namespace: <ns>
@@ -263,18 +268,27 @@ Structure findings as:
 <1-3 sentence diagnosis>
 
 ### Evidence
-- <key log line or event>
-- <relevant condition or limit>
+- <specific kubectl output: command + key line>
+- <log line or event with timestamp>
+- <metric/limit value or resource state>
 
 ### Recommended Fix
 <what to change — config, resource limits, image, secret, etc.>
 Do NOT apply the fix. Present it for the user to execute.
 ```
 
-If multiple containers affected, section per container.
-If namespace scan: table of problem pods, then drill into worst offenders.
+## Cross-Validation Requests
+
+```markdown
+## Cross-Validation Requests
+<one entry per target system, using templates from kubernetes-troubleshooting-flow>
+Format: "K8s → [System]: [what kubectl found] — [what to confirm]"
+Include: actual names, timestamps, values — no placeholders left blank.
+```
+
+If no external correlation is needed (e.g., affinity mismatch, missing ConfigMap) — omit this section.
 
 ## Escalation
 
-If read-only tools are insufficient to diagnose (e.g., need to exec into container):
+If read-only tools insufficient:
 > "Read-only diagnostics exhausted. To go deeper: `kubectl exec -it <pod> -n <ns> -- /bin/sh`. Run manually — this agent does not exec."

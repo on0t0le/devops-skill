@@ -82,29 +82,43 @@ Spawn ALL relevant subagents in a **single message** (one Agent tool call per sy
 ```
 FIRST ACTION — before anything else, invoke the Skill tool:
   skill: "devops-skill:kubernetes-investigator"
-Do NOT run kubectl, bash, or any other tool until the skill has loaded.
+
+SECOND ACTION — immediately after, invoke:
+  skill: "devops-skill:kubernetes-troubleshooting-flow"
+
+Do NOT run kubectl, bash, or any other tool until both skills are loaded.
+The troubleshooting-flow skill contains PromQL/LogQL/AWS correlation templates
+you MUST use when generating cross-validation requests.
 
 Task: Investigate [SERVICE/POD] in namespace [NAMESPACE].
-Focus: [SYMPTOM — pod restarts, OOM, Pending, etc.]
+Focus: [SYMPTOM — pod restarts, OOM, Pending, 5XX errors, etc.]
 Time context: [TIME RANGE]
+EKS cluster: [CLUSTER_NAME if known, else "unknown — discover from kubectl context"]
+AWS profile/region: [PROFILE and REGION if known from incident context]
+
+If service name given but no pod name: start with namespace-wide triage —
+list all non-Running pods, check Warning events, identify worst offenders.
 
 Run read-only kubectl diagnostics per the skill. Report:
 1. Pod status and recent events
 2. Container states and restart count
 3. Relevant log lines (last 50)
-4. Root cause hypothesis
+4. Root cause hypothesis with evidence (cite specific kubectl output lines)
 5. Recommended fix (do not apply)
 
 ## Cross-Validation Requests
-End your report with this section listing specific questions for other systems.
-Format: "[Your system] → [Target system]: [What you found] — [What you need confirmed]"
-Examples of things to cross-validate:
-- Node issues → ask AWS to check EC2 health / spot termination
-- OOMKilled → ask Prometheus to confirm memory spike timing
-- ImagePullBackOff → ask AWS to check ECR image/permissions
-- Deployment at specific time → ask Loki/ES to correlate error onset
+End your report with this section using templates from kubernetes-troubleshooting-flow.
+Fill ALL placeholders with actual values from your kubectl output — no blanks.
+Required cross-validations by failure type:
+- Node NotReady / ContainerStatusUnknown → MUST request AWS node health check
+  (include extracted EC2 instance ID from node ProviderID)
+- OOMKilled → request Prometheus memory metric confirmation
+- CrashLoopBackOff → request Loki error log confirmation
+- Pending (no capacity / VPC CNI) → request AWS nodegroup + subnet check
+- 5XX errors with pod failures → request both Prometheus error rate + Loki errors
+- Affinity mismatch / missing ConfigMap → no cross-validation needed
 
-Be concise. Return structured findings only.
+Be specific. Return structured findings only.
 ```
 
 **Prometheus subagent prompt template:**
