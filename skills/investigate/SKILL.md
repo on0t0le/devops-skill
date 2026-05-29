@@ -18,7 +18,6 @@ trigger: /investigate
 allowed-tools:
   - Agent
   - Read
-  - Bash(date *)
 ---
 
 # DevOps Investigation Orchestrator
@@ -119,31 +118,18 @@ Stop spawning when:
 **Timestamps rule (applies to ALL subagents):**
 YOU (the orchestrator) compute timestamps and embed them as integer literals in the subagent prompt.
 Do NOT instruct subagents to compute timestamps.
+Do NOT run `date` or any bash command to compute timestamps — calculate them mentally.
 
-**IMPORTANT — RTK hook constraints:**
-- One bash call per timestamp. Never chain with `&&`.
-- Never use `$((VAR * N))` arithmetic — RTK blocks variable arithmetic expansion.
-- Compute nanoseconds by mentally appending 9 zeros: if START_S=1748498700, START_NS=1748498700000000000.
+**How to compute epoch timestamps mentally:**
+You know the current date/time from your system context. Compute UTC epoch seconds directly:
+- Use your knowledge of Unix epoch arithmetic (seconds since 1970-01-01 00:00:00 UTC)
+- For absolute times: convert the given local time to UTC, then compute epoch
+- For relative times (e.g. "30 min ago"): subtract seconds from current epoch
+- Nanoseconds: append 9 zeros — if START_S=1748498700, then START_NS=1748498700000000000
 
-For absolute times, run TWO separate bash calls:
-```bash
-# Call 1 — start time
-TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "YYYY-MM-DD HH:MM:SS" +%s
-```
-```bash
-# Call 2 — end time
-TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "YYYY-MM-DD HH:MM:SS" +%s
-```
-
-For relative times, run TWO separate bash calls (macOS):
-```bash
-date -v-30M +%s   # start: 30 min ago
-```
-```bash
-date +%s          # end: now
-```
-
-Embed the resulting integer literals directly in the subagent prompt — subagents never compute timestamps.
+Example for "10:20 Kyiv time (UTC+3) on 2026-05-29":
+- UTC = 07:20 → 2026-05-29 07:20:00 UTC
+- Compute epoch mentally → embed as START_S=<value>
 
 Subagents receive timestamps as literals, e.g.:
 - `START_S=1780038600`
