@@ -22,9 +22,6 @@ allowed-tools:
 
 # DevOps Investigation Orchestrator
 
-Three-phase investigation: broad sweep → cross-expert validation → unified synthesis.
-Experts share findings with each other before the final report.
-
 ## Step 1: Clarify Scope (if needed)
 
 Before spawning agents, ensure you have:
@@ -33,19 +30,9 @@ Before spawning agents, ensure you have:
 - **Namespace** — for Kubernetes (ask if unknown)
 - **Symptom** — errors, slowness, OOM, pod restarts, no traffic, etc.
 
-If user gave enough context (e.g. "investigate errors in myapp since 15:00"), proceed immediately. Don't ask for what you can infer.
+If user gave enough context, proceed immediately. Don't ask for what you can infer.
 
 ## Step 2: Determine Which Systems to Query
-
-Select based on context. When in doubt, query all configured systems.
-
-| System | Query when |
-|---|---|
-| **Kubernetes** | Pod failures, restarts, deployments, OOM, Pending — or always for service issues |
-| **Prometheus** | Metrics: error rate, latency, saturation, alerts firing |
-| **Loki** | Structured log search, Kubernetes-native logs via label selectors |
-| **Elasticsearch** | App logs if ES instances are configured |
-| **AWS** | EC2 health, ECS/EKS task failures, API Gateway 5XX, ELB target health, CloudWatch alarms, CloudTrail events, RDS issues |
 
 Check which instances are configured:
 - `~/.claude/prometheus-instances.json`
@@ -53,30 +40,99 @@ Check which instances are configured:
 - `~/.claude/elasticsearch-instances.json`
 - `~/.claude/aws-instances.json`
 
-Only spawn agents for configured systems (or URL/profile provided in message). Skip unconfigured ones silently — mention in final report if relevant.
+Only spawn agents for configured systems. Skip unconfigured ones silently.
 
-**AWS-only mode**: If the incident is clearly AWS-based (API Gateway alert, CloudWatch alarm, ECS/EKS issue, RDS error, ALB health) AND no Loki/Prometheus/ES instances are configured, skip checking those config files and spawn just the AWS subagent immediately. AWS credentials from the current shell session count as "configured" — check with `aws sts get-caller-identity`. Don't block the investigation waiting for systems that aren't relevant.
+**System selection rules:**
+
+| System | Query when |
+|---|---|
+| **Kubernetes** | Service runs in K8s, or namespace given — always start here |
+| **Loki** | Loki configured AND namespace confirmed present in Loki (verify first) |
+| **Elasticsearch** | ES configured AND service known to ship logs there, or Loki has no data for namespace |
+| **Prometheus** | Metrics: error rate, latency, resource saturation, alerts firing |
+| **AWS** | EC2/ECS/ELB/RDS/API Gateway issues, CloudWatch alarms, CloudTrail events |
+
+**Log system selection — verify before assuming:**
+When namespace is known and Loki is configured, check if logs exist before spawning a full log agent:
+```bash
+curl -s "LOKI_URL/loki/api/v1/label/namespace/values" | jq '.data[] | select(. == "NAMESPACE")'
+```
+- Namespace found in Loki → use Loki for log search
+- Namespace not found in Loki → fall back to ES (if configured), or ask user where logs are shipped
+- Neither configured → note the gap in the final report, do not assume
+
+Do not hardcode "K8s always uses Loki" — some clusters ship pod logs to ES or elsewhere.
+
+**AWS-only mode**: If the incident is AWS-based AND no Loki/Prometheus/ES instances are configured,
+skip checking those config files and spawn just the AWS subagent immediately.
 
 **Symptom-to-system hints:**
-- "ApiGateway5XXError", "5XX alert", API Gateway alarm → AWS subagent (API GW metrics + logs)
-- "pod crashlooping", "OOMKilled", "deployment failed" → Kubernetes subagent
-- "high latency", "error rate spike" → Prometheus + relevant app system
-- "received alert from" + service name → check AWS first, then K8s if EKS involved
+- Pod crashlooping, OOMKilled, deployment failed → start with K8s
+- High latency, error rate spike → start with Prometheus
+- AWS alert, CloudWatch alarm → start with AWS
+- 5XX errors on K8s service → start with K8s
 
-## Step 3: Phase 1 — Broad Parallel Sweep
+## Step 3: Investigation Strategy
 
-Spawn ALL relevant subagents in a **single message** (one Agent tool call per system).
+**One agent at a time. Always.**
+
+Never spawn multiple agents simultaneously. Spawn one, read its findings, decide what to spawn next.
+Pass ALL accumulated findings to each subsequent agent so it has full context.
+
+To revisit a system already queried (e.g. K8s again after Prometheus reveals something),
+spawn a fresh agent of that type and pass the full accumulated context — same pattern as the first time.
+
+### Decision chain
+
+**K8s service (namespace given):**
+1. Spawn K8s agent
+2. Read findings:
+   - HIGH confidence root cause (OOMKilled, CrashLoop + clear error) → spawn ONE targeted follow-up only (e.g. Prometheus for OOM memory confirmation), then synthesize
+   - Ambiguous → spawn Loki (verify namespace first), read findings, then Prometheus if still unclear
+   - All pods healthy → spawn Prometheus, then Loki if metrics show nothing
+
+**AWS-based incident (no K8s namespace):**
+1. Spawn AWS agent
+2. Read findings, spawn Prometheus or K8s if cross-check needed
+
+**Log gap (Loki namespace check failed):**
+→ Spawn ES agent instead; note in report that Loki had no data for namespace
+
+**Re-querying a system:**
+→ Spawn new agent of that type; pass verbatim findings from all prior agents in the prompt
+
+### When to stop
+
+Stop spawning when:
+- Root cause confirmed with evidence from at least one system
+- All relevant configured systems have been queried with no new signal
+- Two consecutive agents return no new findings
+
+## Step 4: Spawning Agents
 
 ⚠️ **Agent tool call requirements — non-negotiable:**
-- Set `model: "haiku"` on every Agent call. Without this the wrong model runs and token costs spike.
+- Set `model: "haiku"` on every Agent call.
 - Set `subagent_type: "general-purpose"` on every Agent call.
-- Do NOT omit either field.
+- One agent per message. Never spawn two agents in the same message.
 
-**IMPORTANT:** Each Phase 1 agent must append a `## Cross-Validation Requests` section to its output listing specific questions it needs other systems to answer. Examples:
-- "K8s → AWS: Node ip-10-0-1-42 NotReady since 14:32 — confirm EC2 instance health and whether it was spot-terminated"
-- "K8s → Prometheus: 3 OOMKilled events on payment-api — confirm memory metric spike before 14:30"
-- "AWS → K8s: ELB target 10.0.1.55:8080 marked unhealthy — which pod is this, what is its readiness state?"
-- "Loki → Prometheus: error storm started at 14:28 — confirm request rate and error rate metrics at that time"
+**Timestamp batching rule (applies to ALL subagents):**
+Agents must compute ALL timestamps in a single bash call before issuing any curl commands.
+Never run a separate bash call per curl. Pattern:
+
+```bash
+read START_S END_S START_NS END_NS <<< $(python3 -c "
+import datetime, sys
+tz = datetime.timezone.utc
+s = datetime.datetime(YYYY, MM, DD, HH, MM, tzinfo=tz)
+e = datetime.datetime(YYYY, MM, DD, HH2, MM2, tzinfo=tz)
+print(int(s.timestamp()), int(e.timestamp()), str(int(s.timestamp()))+'000000000', str(int(e.timestamp()))+'000000000')
+")
+```
+
+Then use `$START_S`, `$END_S`, `$START_NS`, `$END_NS` in all subsequent curl commands.
+Chain multiple curls in a single bash call with `&&` or `;`.
+
+---
 
 **Kubernetes subagent prompt template:**
 ```
@@ -87,14 +143,10 @@ SECOND ACTION — immediately after, invoke:
   skill: "devops-skill:kubernetes-troubleshooting-flow"
 
 Do NOT run kubectl, bash, or any other tool until both skills are loaded.
-The troubleshooting-flow skill contains PromQL/LogQL/AWS correlation templates
-you MUST use when generating cross-validation requests.
 
 Task: Investigate [SERVICE/POD] in namespace [NAMESPACE].
 Focus: [SYMPTOM — pod restarts, OOM, Pending, 5XX errors, etc.]
-Time context: [TIME RANGE]
-EKS cluster: [CLUSTER_NAME if known, else "unknown — discover from kubectl context"]
-AWS profile/region: [PROFILE and REGION if known from incident context]
+Time context: [TIME RANGE UTC]
 
 If service name given but no pod name: start with namespace-wide triage —
 list all non-Running pods, check Warning events, identify worst offenders.
@@ -105,20 +157,17 @@ Run read-only kubectl diagnostics per the skill. Report:
 3. Relevant log lines (last 50)
 4. Root cause hypothesis with evidence (cite specific kubectl output lines)
 5. Recommended fix (do not apply)
+6. Confidence: HIGH (OOMKilled/CrashLoop/clear error) or LOW (ambiguous)
 
-## Cross-Validation Requests
-End your report with this section using templates from kubernetes-troubleshooting-flow.
-Fill ALL placeholders with actual values from your kubectl output — no blanks.
-Required cross-validations by failure type:
-- Node NotReady / ContainerStatusUnknown → MUST request AWS node health check
-  (include extracted EC2 instance ID from node ProviderID)
-- OOMKilled → request Prometheus memory metric confirmation
-- CrashLoopBackOff → request Loki error log confirmation
-- Pending (no capacity / VPC CNI) → request AWS nodegroup + subnet check
-- 5XX errors with pod failures → request both Prometheus error rate + Loki errors
-- Affinity mismatch / missing ConfigMap → no cross-validation needed
-
-Be specific. Return structured findings only.
+## Follow-up Needed
+End your report with this section. State which system to query next and exactly what to check.
+Fill all placeholders with actual values from kubectl output — no blanks.
+- OOMKilled → next: Prometheus — confirm memory spike for pod [POD] at [TIMESTAMP], limit [LIMIT]
+- CrashLoopBackOff → next: Loki — check error logs for namespace=[NS], app=[APP] around [TIMESTAMP]
+- Node NotReady → next: AWS — check EC2 instance [INSTANCE_ID] health at [TIMESTAMP]
+- Pending (VPC CNI) → next: AWS — check nodegroup + subnets in region [REGION]
+- 5XX + pod failures → next: Prometheus — error rate for [SERVICE] + Loki errors in [NS] at [TIMESTAMP]
+- Root cause confirmed, no ambiguity → next: none
 ```
 
 **Prometheus subagent prompt template:**
@@ -127,25 +176,31 @@ FIRST ACTION — before anything else, invoke the Skill tool:
   skill: "devops-skill:prometheus"
 Do NOT run curl, bash, or any other tool until the skill has loaded.
 
-Task: Query metrics for service [SERVICE] in the last [TIME RANGE].
+Task: Query metrics for service [SERVICE] in namespace [NAMESPACE].
 Prometheus instance: [NAME or URL]
+Time window: [START UTC] to [END UTC]
 
-Run these queries and report findings:
-1. Error rate: rate(http_requests_total{job="[SERVICE]",status=~"5.."}[5m])
-2. Request rate: rate(http_requests_total{job="[SERVICE]"}[5m])
-3. Any firing alerts related to [SERVICE]
-4. P99 latency if histogram metrics exist
+Compute all timestamps in ONE bash call before any curl:
+  read START_S END_S <<< $(python3 -c "
+  import datetime
+  tz = datetime.timezone.utc
+  s = datetime.datetime(YYYY,MM,DD,HH,MM,tzinfo=tz)
+  e = datetime.datetime(YYYY,MM,DD,HH2,MM2,tzinfo=tz)
+  print(int(s.timestamp()), int(e.timestamp()))
+  ")
 
-Adapt metric names if the above don't return results — list available metrics for [SERVICE] first.
-Return: metric values, trends (increasing/stable/decreasing), anomalies, exact time of any spike.
+Then run ALL curls in a single batched bash call. Queries to run:
+1. Firing alerts: ALERTS{alertstate="firing"}
+2. Error rate: rate(http_requests_total{job=~"[SERVICE].*",status=~"5.."}[5m])
+3. Pod restarts: increase(kube_pod_container_status_restarts_total{namespace="[NAMESPACE]"}[30m])
+4. Memory (if OOM suspected): container_memory_working_set_bytes{namespace="[NAMESPACE]",container=~"[SERVICE].*"}
+5. CPU: rate(container_cpu_usage_seconds_total{namespace="[NAMESPACE]",container=~"[SERVICE].*"}[5m])
 
-## Cross-Validation Requests
-End your report with this section listing specific questions for other systems.
-Format: "[Your system] → [Target system]: [What you found] — [What you need confirmed]"
-Examples:
-- Spike at specific time → ask K8s if a deployment/restart happened then
-- Memory saturation → ask K8s for OOMKilled events
-- Error rate spike → ask Loki/ES for log errors at that timestamp
+Adapt metric names if above return empty — list available metrics for [SERVICE] first.
+Return: metric values, trends, anomalies, exact time of any spike.
+
+## Follow-up Needed
+End with this section. State next system to query and exact question, or "none" if root cause confirmed.
 ```
 
 **Loki subagent prompt template:**
@@ -154,23 +209,33 @@ FIRST ACTION — before anything else, invoke the Skill tool:
   skill: "devops-skill:loki"
 Do NOT run curl, bash, or any other tool until the skill has loaded.
 
-Task: Search logs for service [SERVICE] in the last [TIME RANGE].
+Task: Search logs for [SERVICE] in namespace [NAMESPACE].
 Loki instance: [NAME or URL]
+Time window: [START UTC] to [END UTC]
 
-Run these searches:
-1. All logs: {app="[SERVICE]"} — last 20 lines to understand log format
-2. Errors: {app="[SERVICE]"} |= "error" OR {app="[SERVICE]"} | json | level="error"
-3. If namespace known: {namespace="[NAMESPACE]", app="[SERVICE]"} |= "error"
+Compute timestamps AND verify namespace in ONE bash call before any log queries:
+  read START_NS END_NS NS_EXISTS <<< $(python3 -c "
+  import datetime, subprocess, json
+  tz = datetime.timezone.utc
+  s = datetime.datetime(YYYY,MM,DD,HH,MM,tzinfo=tz)
+  e = datetime.datetime(YYYY,MM,DD,HH2,MM2,tzinfo=tz)
+  r = subprocess.run(['curl','-s','[LOKI_URL]/loki/api/v1/label/namespace/values'], capture_output=True, text=True)
+  namespaces = json.loads(r.stdout).get('data', [])
+  found = '1' if '[NAMESPACE]' in namespaces else '0'
+  print(str(int(s.timestamp()))+'000000000', str(int(e.timestamp()))+'000000000', found)
+  ")
+
+If NS_EXISTS=0: report "namespace [NAMESPACE] not found in Loki — logs may be in ES or another store" and stop.
+
+If NS_EXISTS=1, run ALL log curls in a single bash call:
+1. Format discovery: {namespace="[NAMESPACE]",app=~"[SERVICE].*"} — limit=20, direction=backward
+2. Error logs: {namespace="[NAMESPACE]",app=~"[SERVICE].*"} |= "error"
+3. If JSON: {namespace="[NAMESPACE]",app=~"[SERVICE].*"} | json | level="error"
 
 Return: error log samples (5-10 most relevant), error patterns, first/last occurrence times.
 
-## Cross-Validation Requests
-End your report with this section listing specific questions for other systems.
-Format: "[Your system] → [Target system]: [What you found] — [What you need confirmed]"
-Examples:
-- Error onset time → ask Prometheus to confirm metric spike at same time
-- Connection refused errors → ask K8s if target pod was restarting
-- AWS API errors in logs → ask AWS to check IAM/resource state
+## Follow-up Needed
+End with this section. State next system to query and exact question, or "none" if root cause confirmed.
 ```
 
 **AWS subagent prompt template:**
@@ -180,39 +245,33 @@ FIRST ACTION — before anything else, invoke the Skill tool:
 Do NOT run aws CLI, bash, or any other tool until the skill has loaded.
 
 Task: Investigate [SERVICE] issue in AWS [PROFILE/REGION].
-Focus: [SYMPTOM — EC2 down, ECS task failing, ALB unhealthy targets, alarms firing,
-        API Gateway 5XX errors, EKS node issues, RDS errors, etc.]
+Focus: [SYMPTOM]
 Time context: [TIME RANGE]
 
-IMPORTANT: Use the correct UTC timestamps for all CloudWatch/Logs queries.
-The user's local time is [LOCAL TIME + TIMEZONE]. Convert to UTC before querying:
-- CloudWatch metric queries: use ISO 8601 UTC strings ("2026-05-27T00:00:00Z")
-- CloudWatch Logs Insights: use `date -u` or Python to compute Unix timestamps in UTC
-  → python3 -c "import datetime; print(int(datetime.datetime(YYYY,MM,DD,HH,MM, tzinfo=datetime.timezone.utc).timestamp()))"
-  Do NOT use macOS `date -j` with a Z-suffix input — it ignores the Z and uses local time.
+IMPORTANT: Compute UTC timestamps correctly. User's local time: [LOCAL TIME + TIMEZONE].
+Compute in ONE python3 call:
+  python3 -c "
+  import datetime
+  tz = datetime.timezone.utc
+  s = datetime.datetime(YYYY,MM,DD,HH,MM,tzinfo=tz)
+  e = datetime.datetime(YYYY,MM,DD,HH2,MM2,tzinfo=tz)
+  print('START:', s.isoformat(), '| END:', e.isoformat())
+  print('START_UNIX:', int(s.timestamp()), '| END_UNIX:', int(e.timestamp()))
+  "
+Do NOT use macOS `date -j` with Z-suffix — it ignores Z and uses local time.
 
-Run these checks and report findings:
-1. Any ALARM-state CloudWatch alarms related to [SERVICE]
-2. API Gateway 5XX metrics if applicable — check both `5XXError` metric and execution logs
-   - List REST APIs: `aws apigateway get-rest-apis`
-   - Get 5XX metric per API by ApiName dimension
-   - If execution logs enabled: query with correct UTC timestamps for status 5XX entries
-3. ECS/EKS service status if applicable (desired vs running count, recent events)
-4. NLB/ALB target health if applicable (unhealthy targets + reason)
-5. CloudTrail: recent changes to [SERVICE] resources in [TIME RANGE]
-6. RDS events/errors if database is involved
+Run checks in batched bash calls:
+1. ALARM-state CloudWatch alarms related to [SERVICE]
+2. API Gateway 5XX metrics (if applicable)
+3. ECS/EKS service status: desired vs running count, recent events
+4. NLB/ALB target health: unhealthy targets + reason
+5. CloudTrail: recent changes to [SERVICE] resources in time window
+6. RDS events/errors if database involved
 
 Return: resource state, anomalies, timeline of changes, root cause hypothesis.
 
-## Cross-Validation Requests
-End your report with this section listing specific questions for other systems.
-Format: "[Your system] → [Target system]: [What you found] — [What you need confirmed]"
-Examples:
-- ELB unhealthy target IP → ask K8s which pod has that IP, check its readiness
-- CloudTrail config change at time T → ask Loki/ES for errors starting at T
-- Spot termination at time T → ask K8s for node evictions at T
-- ASG scale-in event → ask Prometheus if traffic/load changed before it
-- API GW 504 on health endpoint → ask K8s if pods were restarting at that time
+## Follow-up Needed
+End with this section. State next system to query and exact question, or "none" if root cause confirmed.
 ```
 
 **Elasticsearch subagent prompt template:**
@@ -221,86 +280,27 @@ FIRST ACTION — before anything else, invoke the Skill tool:
   skill: "devops-skill:elasticsearch"
 Do NOT run curl, bash, or any other tool until the skill has loaded.
 
+NOTE: Use ES only for application business logs — NOT for K8s pod/infrastructure logs
+(those are in Loki). Scope search to [SERVICE]-specific application indexes only.
+
 Task: Search logs for [SERVICE] in the last [TIME RANGE].
 ES instance: [NAME or URL]
+Time window: [START UTC] to [END UTC]
 
-Search strategy:
-1. List indexes matching [SERVICE] or app_logs-* pattern
-2. Search for "error" OR "exception" OR "fatal" in relevant index
-3. Include time filter for [TIME RANGE]
+Search strategy (all in one batched bash call):
+1. List indexes matching [SERVICE] pattern
+2. Search "error" OR "exception" OR "fatal" in relevant index with time filter
+3. Include @timestamp range: [START UTC] to [END UTC]
 
 Return: error count, sample error messages (5-10), any stack traces, first/last occurrence.
 
-## Cross-Validation Requests
-End your report with this section listing specific questions for other systems.
-Format: "[Your system] → [Target system]: [What you found] — [What you need confirmed]"
-Examples:
-- Error onset time → ask Prometheus for metric spike at same time
-- DB connection errors → ask AWS to check RDS health at that time
-- Error started after deployment → ask K8s for deployment events at that time
+## Follow-up Needed
+End with this section. State next system to query and exact question, or "none" if root cause confirmed.
 ```
-
-## Step 4: Phase 2 — Cross-Expert Validation
-
-After all Phase 1 agents complete:
-
-1. **Collect all `## Cross-Validation Requests`** from every agent's output.
-2. **Group by target system** — deduplicate overlapping questions.
-3. **Spawn targeted follow-up agents** (in parallel, one per target system that has requests).
-
-Each follow-up agent receives:
-- The original context (service, namespace, time range)
-- The specific findings from the requesting expert verbatim
-- The exact questions to answer
-
-**Phase 2 subagent prompt template:**
-```
-FIRST ACTION — before anything else, invoke the Skill tool:
-  skill: "devops-skill:[TARGET SKILL NAME]"
-  (kubernetes-investigator | aws-investigator | prometheus | elasticsearch | loki)
-Do NOT run any tool until the skill has loaded.
-
-You are a [TARGET SYSTEM] expert.
-
-## Context from Phase 1 Investigation
-
-The following findings were reported by other expert agents and require your validation:
-
-### From Kubernetes expert:
-[Paste K8s Cross-Validation Requests targeting this system, if any]
-
-### From AWS expert:
-[Paste AWS Cross-Validation Requests targeting this system, if any]
-
-### From Prometheus expert:
-[Paste Prometheus Cross-Validation Requests targeting this system, if any]
-
-### From Loki expert:
-[Paste Loki Cross-Validation Requests targeting this system, if any]
-
-### From Elasticsearch expert:
-[Paste ES Cross-Validation Requests targeting this system, if any]
-
-## Your Task
-
-Answer each question above with targeted queries. For each request:
-1. State the question you're answering
-2. Show the command/query you ran
-3. Give the result (confirmed / refuted / inconclusive)
-4. Add any new findings the question led you to discover
-
-Service: [SERVICE] | Namespace: [NAMESPACE] | Time: [TIME RANGE]
-
-Be concise. Don't re-investigate what wasn't asked — focus on the cross-validation questions only.
-```
-
-**Skip Phase 2** if no agent produced any Cross-Validation Requests, or all requests target unconfigured systems — proceed directly to Step 5.
-
-**Announce Phase 2** to the user before spawning: `🔄 Phase 2: Cross-validating findings between experts…`
 
 ## Step 5: Synthesize Results
 
-After Phase 1 and Phase 2 complete, write a unified incident report:
+Write a unified incident report:
 
 ```
 # Investigation Report: [SERVICE] — [TIME]
@@ -308,57 +308,34 @@ After Phase 1 and Phase 2 complete, write a unified incident report:
 ## Summary
 [2-3 sentence executive summary: what's broken, likely cause, severity]
 
-## Findings by System
+## Findings
 
 ### Kubernetes
-[Key findings from K8s — pod state, restarts, events]
-
-### AWS Infrastructure
-[EC2/ECS/ELB state, CloudWatch alarms, CloudTrail changes]
+[Pod state, restarts, events — with specific timestamps]
 
 ### Metrics (Prometheus)
-[Error rate, latency, anomalies, exact timestamps]
+[Error rate, memory/CPU, anomalies — only if queried]
 
-### Logs — Loki / Elasticsearch
-[Error patterns, first occurrence, sample messages]
+### Logs — Loki
+[Error patterns, first occurrence, sample messages — only if queried]
 
-## Cross-Expert Validation Results
-[What each expert confirmed or refuted for others — only include if Phase 2 ran]
-- K8s → AWS confirmed: [finding]
-- AWS → K8s confirmed: [finding]
-- etc.
+### AWS Infrastructure
+[EC2/ECS/ELB state, alarms, CloudTrail — only if queried]
 
 ## Root Cause Analysis
-[Synthesize across ALL phases: correlate timing of errors with pod restarts/deploys/metrics spikes.
-Highlight where multiple systems independently confirm the same cause.]
+[Synthesize: correlate timing across systems. Cite specific evidence.]
 
 ## Timeline
-- HH:MM — [first symptom from any system]
-- HH:MM — [escalation or pod restart / AWS event / metric spike]
-- HH:MM — [cross-validation confirms cause]
-- HH:MM — [current state]
+- HH:MM UTC — [first symptom]
+- HH:MM UTC — [escalation / restart / spike]
+- HH:MM UTC — [current state]
 
 ## Recommended Actions
-1. [Most likely fix — specific, actionable, informed by cross-validation]
+1. [Most likely fix — specific and actionable]
 2. [Secondary action if root cause unclear]
-3. [Monitoring suggestion]
-
-**Note:** No changes were made. All diagnostics are read-only.
+3. [Monitoring/alerting improvement]
 ```
 
-## Parallelism Rules
+Omit sections for systems that were not queried.
 
-- Phase 1: spawn all agents **simultaneously** in one message
-- Phase 2: spawn all follow-up agents **simultaneously** in one message (grouped by target system)
-- Never wait for one Phase 1 agent before starting others
-- Only run sequentially when output of one is strictly required for another (e.g., need pod name from K8s before querying logs by pod label)
-
-## Context Passing
-
-Pass specific context to each agent — don't make them guess:
-- Exact service name, namespace, time range
-- Instance name (from config) or URL
-- Specific symptom to focus on
-- **Phase 2:** verbatim findings from the requesting expert
-
-Vague subagent prompts produce vague results. Be specific.
+**Note:** No changes were made. All diagnostics are read-only.
