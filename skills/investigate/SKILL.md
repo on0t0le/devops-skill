@@ -118,17 +118,31 @@ Stop spawning when:
 
 **Timestamps rule (applies to ALL subagents):**
 YOU (the orchestrator) compute timestamps and embed them as integer literals in the subagent prompt.
-Do NOT instruct subagents to compute timestamps with python3 or any compound shell script.
+Do NOT instruct subagents to compute timestamps.
 
-Compute timestamps with a single `date` bash call BEFORE writing the subagent prompt.
-Cross-platform (macOS/Linux):
+**IMPORTANT — RTK hook constraints:**
+- One bash call per timestamp. Never chain with `&&`.
+- Never use `$((VAR * N))` arithmetic — RTK blocks variable arithmetic expansion.
+- Compute nanoseconds by mentally appending 9 zeros: if START_S=1748498700, START_NS=1748498700000000000.
+
+For absolute times, run TWO separate bash calls:
 ```bash
-# macOS
-START_S=$(TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "YYYY-MM-DD HH:MM:SS" +%s)
-END_S=$(TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "YYYY-MM-DD HH:MM:SS" +%s)
-# Then: START_NS=$((START_S * 1000000000))  END_NS=$((END_S * 1000000000))
+# Call 1 — start time
+TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "YYYY-MM-DD HH:MM:SS" +%s
 ```
-For relative times: `END_S=$(date +%s)` and `START_S=$((END_S - 1800))` for last 30 min.
+```bash
+# Call 2 — end time
+TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "YYYY-MM-DD HH:MM:SS" +%s
+```
+
+For relative times, run TWO separate bash calls (macOS):
+```bash
+date -v-30M +%s   # start: 30 min ago
+```
+```bash
+date +%s          # end: now
+```
+
 Embed the resulting integer literals directly in the subagent prompt — subagents never compute timestamps.
 
 Subagents receive timestamps as literals, e.g.:
