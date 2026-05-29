@@ -18,6 +18,7 @@ trigger: /investigate
 allowed-tools:
   - Agent
   - Read
+  - Bash(date *)
 ---
 
 # DevOps Investigation Orchestrator
@@ -115,22 +116,29 @@ Stop spawning when:
 - Set `subagent_type: "general-purpose"` on every Agent call.
 - One agent per message. Never spawn two agents in the same message.
 
-**Timestamp batching rule (applies to ALL subagents):**
-Agents must compute ALL timestamps in a single bash call before issuing any curl commands.
-Never run a separate bash call per curl. Pattern:
+**Timestamps rule (applies to ALL subagents):**
+YOU (the orchestrator) compute timestamps and embed them as integer literals in the subagent prompt.
+Do NOT instruct subagents to compute timestamps with python3 or any compound shell script.
 
+Compute timestamps with a single `date` bash call BEFORE writing the subagent prompt.
+Cross-platform (macOS/Linux):
 ```bash
-read START_S END_S START_NS END_NS <<< $(python3 -c "
-import datetime, sys
-tz = datetime.timezone.utc
-s = datetime.datetime(YYYY, MM, DD, HH, MM, tzinfo=tz)
-e = datetime.datetime(YYYY, MM, DD, HH2, MM2, tzinfo=tz)
-print(int(s.timestamp()), int(e.timestamp()), str(int(s.timestamp()))+'000000000', str(int(e.timestamp()))+'000000000')
-")
+# macOS
+START_S=$(TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "YYYY-MM-DD HH:MM:SS" +%s)
+END_S=$(TZ=UTC date -j -f "%Y-%m-%d %H:%M:%S" "YYYY-MM-DD HH:MM:SS" +%s)
+# Then: START_NS=$((START_S * 1000000000))  END_NS=$((END_S * 1000000000))
 ```
+For relative times: `END_S=$(date +%s)` and `START_S=$((END_S - 1800))` for last 30 min.
+Embed the resulting integer literals directly in the subagent prompt — subagents never compute timestamps.
 
-Then use `$START_S`, `$END_S`, `$START_NS`, `$END_NS` in all subsequent curl commands.
-Chain multiple curls in a single bash call with `&&` or `;`.
+Subagents receive timestamps as literals, e.g.:
+- `START_S=1780038600`
+- `END_S=1780040400`
+- `START_NS=1780038600000000000`
+- `END_NS=1780040400000000000`
+
+**One curl per bash call.** Never chain multiple curl commands in a single bash call.
+Each query = one small, focused bash call that's easy to review.
 
 ---
 
@@ -178,25 +186,23 @@ Do NOT run curl, bash, or any other tool until the skill has loaded.
 
 Task: Query metrics for service [SERVICE] in namespace [NAMESPACE].
 Prometheus instance: [NAME or URL]
-Time window: [START UTC] to [END UTC]
+START_S=[EPOCH]  END_S=[EPOCH]  (pre-computed, use as literals)
 
-Compute all timestamps in ONE bash call before any curl:
-  read START_S END_S <<< $(python3 -c "
-  import datetime
-  tz = datetime.timezone.utc
-  s = datetime.datetime(YYYY,MM,DD,HH,MM,tzinfo=tz)
-  e = datetime.datetime(YYYY,MM,DD,HH2,MM2,tzinfo=tz)
-  print(int(s.timestamp()), int(e.timestamp()))
-  ")
+Run each query as a SEPARATE bash call:
 
-Then run ALL curls in a single batched bash call. Queries to run:
-1. Firing alerts: ALERTS{alertstate="firing"}
-2. Error rate: rate(http_requests_total{job=~"[SERVICE].*",status=~"5.."}[5m])
-3. Pod restarts: increase(kube_pod_container_status_restarts_total{namespace="[NAMESPACE]"}[30m])
-4. Memory (if OOM suspected): container_memory_working_set_bytes{namespace="[NAMESPACE]",container=~"[SERVICE].*"}
-5. CPU: rate(container_cpu_usage_seconds_total{namespace="[NAMESPACE]",container=~"[SERVICE].*"}[5m])
+Call 1 — firing alerts:
+curl -s -G "URL/api/v1/query" --data-urlencode 'query=ALERTS{alertstate="firing"}' --data-urlencode "time=END_S"
 
-Adapt metric names if above return empty — list available metrics for [SERVICE] first.
+Call 2 — HTTP 5xx error rate:
+curl -s -G "URL/api/v1/query_range" --data-urlencode 'query=sum by(job)(increase(http_requests_total{status=~"5.."}[10m]))' --data-urlencode "start=START_S" --data-urlencode "end=END_S" --data-urlencode "step=60"
+
+Call 3 — pod restarts:
+curl -s -G "URL/api/v1/query" --data-urlencode 'query=topk(5,increase(kube_pod_container_status_restarts_total{namespace="[NAMESPACE]"}[30m]))' --data-urlencode "time=END_S"
+
+Call 4 — if 5xx found, check error rate by ingress/service:
+curl -s -G "URL/api/v1/query_range" --data-urlencode 'query=sum by(ingress,service)(increase(nginx_ingress_controller_requests{status=~"5.."}[10m]))' --data-urlencode "start=START_S" --data-urlencode "end=END_S" --data-urlencode "step=60"
+
+Adapt metric names if empty — discover with label/job/values first.
 Return: metric values, trends, anomalies, exact time of any spike.
 
 ## Follow-up Needed
@@ -211,26 +217,19 @@ Do NOT run curl, bash, or any other tool until the skill has loaded.
 
 Task: Search logs for [SERVICE] in namespace [NAMESPACE].
 Loki instance: [NAME or URL]
-Time window: [START UTC] to [END UTC]
+START_NS=[EPOCH_NS]  END_NS=[EPOCH_NS]  (pre-computed nanoseconds, use as literals)
 
-Compute timestamps AND verify namespace in ONE bash call before any log queries:
-  read START_NS END_NS NS_EXISTS <<< $(python3 -c "
-  import datetime, subprocess, json
-  tz = datetime.timezone.utc
-  s = datetime.datetime(YYYY,MM,DD,HH,MM,tzinfo=tz)
-  e = datetime.datetime(YYYY,MM,DD,HH2,MM2,tzinfo=tz)
-  r = subprocess.run(['curl','-s','[LOKI_URL]/loki/api/v1/label/namespace/values'], capture_output=True, text=True)
-  namespaces = json.loads(r.stdout).get('data', [])
-  found = '1' if '[NAMESPACE]' in namespaces else '0'
-  print(str(int(s.timestamp()))+'000000000', str(int(e.timestamp()))+'000000000', found)
-  ")
+Run each step as a SEPARATE bash call:
 
-If NS_EXISTS=0: report "namespace [NAMESPACE] not found in Loki — logs may be in ES or another store" and stop.
+Call 1 — verify namespace exists:
+curl -s "LOKI_URL/loki/api/v1/label/namespace/values"
+(If [NAMESPACE] not in result, stop and report "namespace not found in Loki".)
 
-If NS_EXISTS=1, run ALL log curls in a single bash call:
-1. Format discovery: {namespace="[NAMESPACE]",app=~"[SERVICE].*"} — limit=20, direction=backward
-2. Error logs: {namespace="[NAMESPACE]",app=~"[SERVICE].*"} |= "error"
-3. If JSON: {namespace="[NAMESPACE]",app=~"[SERVICE].*"} | json | level="error"
+Call 2 — recent log sample (format discovery):
+curl -s -G "LOKI_URL/loki/api/v1/query_range" --data-urlencode 'query={namespace="[NAMESPACE]",app=~"[SERVICE].*"}' --data-urlencode "start=START_NS" --data-urlencode "end=END_NS" --data-urlencode "limit=20" --data-urlencode "direction=backward"
+
+Call 3 — error logs:
+curl -s -G "LOKI_URL/loki/api/v1/query_range" --data-urlencode 'query={namespace="[NAMESPACE]",app=~"[SERVICE].*"} |= "error"' --data-urlencode "start=START_NS" --data-urlencode "end=END_NS" --data-urlencode "limit=50"
 
 Return: error log samples (5-10 most relevant), error patterns, first/last occurrence times.
 
@@ -246,27 +245,23 @@ Do NOT run aws CLI, bash, or any other tool until the skill has loaded.
 
 Task: Investigate [SERVICE] issue in AWS [PROFILE/REGION].
 Focus: [SYMPTOM]
-Time context: [TIME RANGE]
+START_ISO=[ISO8601_UTC]  END_ISO=[ISO8601_UTC]  (pre-computed, use as literals)
 
-IMPORTANT: Compute UTC timestamps correctly. User's local time: [LOCAL TIME + TIMEZONE].
-Compute in ONE python3 call:
-  python3 -c "
-  import datetime
-  tz = datetime.timezone.utc
-  s = datetime.datetime(YYYY,MM,DD,HH,MM,tzinfo=tz)
-  e = datetime.datetime(YYYY,MM,DD,HH2,MM2,tzinfo=tz)
-  print('START:', s.isoformat(), '| END:', e.isoformat())
-  print('START_UNIX:', int(s.timestamp()), '| END_UNIX:', int(e.timestamp()))
-  "
-Do NOT use macOS `date -j` with Z-suffix — it ignores Z and uses local time.
+Run each check as a SEPARATE bash call:
 
-Run checks in batched bash calls:
-1. ALARM-state CloudWatch alarms related to [SERVICE]
-2. API Gateway 5XX metrics (if applicable)
-3. ECS/EKS service status: desired vs running count, recent events
-4. NLB/ALB target health: unhealthy targets + reason
-5. CloudTrail: recent changes to [SERVICE] resources in time window
-6. RDS events/errors if database involved
+Call 1 — CloudWatch alarms in ALARM state:
+aws cloudwatch describe-alarms --state-value ALARM --profile [PROFILE] --region [REGION]
+
+Call 2 — ECS service status (if applicable):
+aws ecs describe-services --cluster [CLUSTER] --services [SERVICE] --profile [PROFILE] --region [REGION]
+
+Call 3 — ALB/NLB target health:
+aws elbv2 describe-target-health --target-group-arn [ARN] --profile [PROFILE] --region [REGION]
+
+Call 4 — CloudTrail recent events for service:
+aws cloudtrail lookup-events --lookup-attributes AttributeKey=ResourceName,AttributeValue=[SERVICE] --start-time START_ISO --end-time END_ISO --profile [PROFILE] --region [REGION]
+
+Skip calls where resource names are unknown — note the gap.
 
 Return: resource state, anomalies, timeline of changes, root cause hypothesis.
 
@@ -287,10 +282,15 @@ Task: Search logs for [SERVICE] in the last [TIME RANGE].
 ES instance: [NAME or URL]
 Time window: [START UTC] to [END UTC]
 
-Search strategy (all in one batched bash call):
-1. List indexes matching [SERVICE] pattern
-2. Search "error" OR "exception" OR "fatal" in relevant index with time filter
-3. Include @timestamp range: [START UTC] to [END UTC]
+START_ISO=[ISO8601_UTC]  END_ISO=[ISO8601_UTC]  (pre-computed, use as literals)
+
+Run each step as a SEPARATE bash call:
+
+Call 1 — list indexes matching service:
+curl -s "ES_URL/_cat/indices/[SERVICE]*?h=index,docs.count&s=index"
+
+Call 2 — search errors in time window:
+curl -s -X GET "ES_URL/[INDEX]/_search" -H "Content-Type: application/json" -d '{"query":{"bool":{"must":[{"range":{"@timestamp":{"gte":"START_ISO","lte":"END_ISO"}}},{"query_string":{"query":"error OR exception OR fatal"}}]}},"size":10,"sort":[{"@timestamp":{"order":"desc"}}]}'
 
 Return: error count, sample error messages (5-10), any stack traces, first/last occurrence.
 
